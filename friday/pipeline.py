@@ -5,7 +5,7 @@ Flow:
     → screenshot (parallel with audio capture start)
     → audio capture (VAD auto-stop)
     → Deepgram transcription
-    → GPT-4o vision + tool routing
+    → LLM vision + tool routing (Gemini 2.0 Flash by default)
     → tool execution
     → ElevenLabs TTS playback
 
@@ -87,8 +87,8 @@ class Pipeline:
             self._on_state("idle")
             return
 
-        # ── Stage 4: GPT-4o orchestration ────────────────────────────────────
-        from friday.orchestrate.gpt4o import orchestrate
+        # ── Stage 4: LLM orchestration ───────────────────────────────────────
+        from friday.orchestrate.llm import orchestrate
 
         tool_name, result = await orchestrate(transcript, screenshot_b64)
         t_orchestrate = time.monotonic()

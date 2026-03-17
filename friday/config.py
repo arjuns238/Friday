@@ -45,7 +45,38 @@ SCREENSHOT_MAX_KB: int = int(os.environ.get("FRIDAY_SCREENSHOT_MAX_KB", "400"))
 SCREENSHOT_JPEG_QUALITY: int = 80  # starting quality, reduced until under max KB
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
-OPENAI_MODEL: str = "gpt-4o"
+# Set FRIDAY_LLM to switch providers: "gemini" | "openai" | "claude"
+# Gemini uses Google's OpenAI-compatible endpoint — no extra SDK needed.
+LLM_PROVIDER: str = os.environ.get("FRIDAY_LLM", "gemini")
+
+_LLM_CONFIGS: dict[str, dict] = {
+    "gemini": {
+        "model":    "gemini-2.0-flash",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_key":  lambda: GOOGLE_API_KEY,
+    },
+    "openai": {
+        "model":    "gpt-4o",
+        "base_url": None,  # default OpenAI endpoint
+        "api_key":  lambda: OPENAI_API_KEY,
+    },
+    "claude": {
+        "model":    "claude-haiku-4-5-20251001",
+        "base_url": "https://api.anthropic.com/v1/",
+        "api_key":  lambda: os.environ.get("ANTHROPIC_API_KEY", ""),
+    },
+}
+
+def llm_config() -> dict:
+    """Return the active LLM config dict: {model, base_url, api_key}."""
+    cfg = _LLM_CONFIGS.get(LLM_PROVIDER)
+    if cfg is None:
+        raise ValueError(f"Unknown FRIDAY_LLM provider: {LLM_PROVIDER!r}. Choose: {list(_LLM_CONFIGS)}")
+    return {
+        "model":    cfg["model"],
+        "base_url": cfg["base_url"],
+        "api_key":  cfg["api_key"](),
+    }
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 FRIDAY_DIR: Path = Path.home() / ".friday"
@@ -60,11 +91,24 @@ LOG_LEVEL: str = os.environ.get("FRIDAY_LOG_LEVEL", "INFO")
 def validate_phase0() -> list[str]:
     """Return list of missing required keys for Phase 0."""
     missing = []
+
+    # STT + TTS always required
     for name, val in [
         ("DEEPGRAM_API_KEY", DEEPGRAM_API_KEY),
-        ("OPENAI_API_KEY", OPENAI_API_KEY),
         ("ELEVENLABS_API_KEY", ELEVENLABS_API_KEY),
     ]:
         if not val:
             missing.append(name)
+
+    # LLM key depends on active provider
+    cfg = _LLM_CONFIGS.get(LLM_PROVIDER, {})
+    key_val = cfg.get("api_key", lambda: "")()
+    key_names = {
+        "gemini": "GOOGLE_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "claude": "ANTHROPIC_API_KEY",
+    }
+    if not key_val:
+        missing.append(key_names.get(LLM_PROVIDER, "LLM_API_KEY"))
+
     return missing

@@ -1,4 +1,12 @@
-"""GPT-4o vision orchestrator — routes voice + screenshot to the right tool."""
+"""LLM orchestrator — routes voice + screenshot to the right tool.
+
+Provider is controlled by FRIDAY_LLM in .env:
+  FRIDAY_LLM=gemini   → Gemini 2.0 Flash via Google's OpenAI-compatible endpoint (default)
+  FRIDAY_LLM=openai   → GPT-4o
+  FRIDAY_LLM=claude   → Claude Haiku 4.5
+
+All three use the OpenAI SDK — just different base_url / api_key / model.
+"""
 from __future__ import annotations
 
 import json
@@ -37,19 +45,20 @@ async def orchestrate(
     transcript: str,
     screenshot_b64: Optional[str] = None,
 ) -> tuple[str, str]:
-    """Call GPT-4o with transcript + optional screenshot. Returns (tool_name, result).
+    """Call the configured LLM with transcript + optional screenshot.
 
-    If the tool is speak_answer, result is the text to speak.
-    Otherwise result is a status string from the tool execution.
+    Returns (tool_name, result). If tool is speak_answer, result is the text to speak.
     """
     from openai import AsyncOpenAI
     from friday.tools.base import TOOL_DEFINITIONS, dispatch_tool
 
-    client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+    cfg = config.llm_config()
+    client = AsyncOpenAI(
+        api_key=cfg["api_key"],
+        base_url=cfg["base_url"],  # None = default OpenAI endpoint
+    )
 
-    # Build the user message
     user_content: list[dict] = []
-
     if screenshot_b64:
         user_content.append({
             "type": "image_url",
@@ -58,11 +67,7 @@ async def orchestrate(
                 "detail": "high",
             },
         })
-
-    user_content.append({
-        "type": "text",
-        "text": f"User said: {transcript}",
-    })
+    user_content.append({"type": "text", "text": f"User said: {transcript}"})
 
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
@@ -70,18 +75,21 @@ async def orchestrate(
     ]
 
     t0 = time.monotonic()
-    log.debug("Calling GPT-4o (has_image=%s, transcript=%r)", bool(screenshot_b64), transcript)
+    log.debug(
+        "Calling %s/%s (has_image=%s, transcript=%r)",
+        config.LLM_PROVIDER, cfg["model"], bool(screenshot_b64), transcript,
+    )
 
     response = await client.chat.completions.create(
-        model=config.OPENAI_MODEL,
+        model=cfg["model"],
         messages=messages,
         tools=TOOL_DEFINITIONS,
-        tool_choice="required",  # always call a tool
+        tool_choice="required",
         max_tokens=1024,
     )
 
     elapsed_ms = (time.monotonic() - t0) * 1000
-    log.info("GPT-4o responded in %.0f ms", elapsed_ms)
+    log.info("%s responded in %.0f ms", cfg["model"], elapsed_ms)
 
     tool_call = response.choices[0].message.tool_calls[0]
     tool_name = tool_call.function.name
