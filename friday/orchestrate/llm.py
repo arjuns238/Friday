@@ -26,8 +26,8 @@ Your job: decide which tool to call based on what you see and hear.
 Decision rules:
 - If the screenshot shows a terminal with Claude Code running, and the user is asking about code → inject_claude_code
 - If the screenshot shows Gmail/Outlook, or the user says "email" / "write to" / "reply" → draft_gmail
-- If the user asks "what is", "find", "look up", "search", "latest", "who is" → web_search
-- For everything else (factual questions, explanations, time, math, opinions) → speak_answer
+- Use web_search when you feel you need to look something up or when you don't have the necessary information to respond accurately (e.g. current events, recent releases, prices, unknown facts). If you can answer confidently from what's visible on screen or general knowledge, use speak_answer instead.
+- For everything else (factual questions, explanations, reasoning about visible content, opinions) → speak_answer
 
 When using inject_claude_code:
 - Formulate a precise, self-contained prompt for Claude Code
@@ -37,25 +37,30 @@ When using inject_claude_code:
 When using speak_answer:
 - Keep responses under 3 sentences for natural voice interaction
 - Be direct and conversational — this will be spoken aloud
+- If the user is showing you content on screen (notes, code, docs), analyze what you see and respond directly
+
+For tools that have a `thinking` field, always fill it with a natural, brief phrase that acknowledges what you're about to do. This will be spoken aloud immediately. Keep it contextual, not generic.
 
 Always call exactly one tool. Do not respond with plain text."""
 
 
-async def orchestrate(
+async def plan_tool_call(
     transcript: str,
     screenshot_b64: Optional[str] = None,
-) -> tuple[str, str]:
-    """Call the configured LLM with transcript + optional screenshot.
+    history: Optional[list[dict]] = None,
+) -> tuple[str, dict, Optional[str]]:
+    """Call the LLM and return (tool_name, arguments, thinking) WITHOUT executing the tool.
 
-    Returns (tool_name, result). If tool is speak_answer, result is the text to speak.
+    Callers should immediately speak `thinking` and dispatch the tool in parallel,
+    so the acknowledgement phrase plays during tool execution rather than after.
     """
     from openai import AsyncOpenAI
-    from friday.tools.base import TOOL_DEFINITIONS, dispatch_tool
+    from friday.tools.base import TOOL_DEFINITIONS
 
     cfg = config.llm_config()
     client = AsyncOpenAI(
         api_key=cfg["api_key"],
-        base_url=cfg["base_url"],  # None = default OpenAI endpoint
+        base_url=cfg["base_url"],
     )
 
     user_content: list[dict] = []
@@ -69,10 +74,10 @@ async def orchestrate(
         })
     user_content.append({"type": "text", "text": f"User said: {transcript}"})
 
-    messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
+    messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history)  # inject last N turns of conversation context
+    messages.append({"role": "user", "content": user_content})
 
     t0 = time.monotonic()
     log.debug(
@@ -94,8 +99,49 @@ async def orchestrate(
     tool_call = response.choices[0].message.tool_calls[0]
     tool_name = tool_call.function.name
     arguments = json.loads(tool_call.function.arguments)
+    thinking = arguments.get("thinking") if tool_name != "speak_answer" else None
 
-    log.info("Tool: %s  Args: %s", tool_name, json.dumps(arguments, ensure_ascii=False)[:200])
+    log.info("Tool: %s  Thinking: %r  Args: %s", tool_name, thinking, json.dumps(arguments, ensure_ascii=False)[:200])
 
-    result = await dispatch_tool(tool_name, arguments)
-    return tool_name, result
+    return tool_name, arguments, thinking
+
+
+async def synthesize_response(user_query: str, tool_result: str) -> str:
+    """Convert raw web search results into a natural spoken response.
+
+    Uses the same configured LLM without tools — just text generation.
+    """
+    from openai import AsyncOpenAI
+
+    cfg = config.llm_config()
+    client = AsyncOpenAI(
+        api_key=cfg["api_key"],
+        base_url=cfg["base_url"],
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a voice assistant. The user asked a question and you searched the web. "
+                "Summarize the search results into a natural, conversational spoken response. "
+                "2-3 sentences max. Be direct and specific. No markdown, no bullet points, no URLs. "
+                "Speak as if you're answering in conversation."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"User asked: {user_query}\n\nSearch results:\n{tool_result}",
+        },
+    ]
+
+    t0 = time.monotonic()
+    response = await client.chat.completions.create(
+        model=cfg["model"],
+        messages=messages,
+        max_tokens=256,
+    )
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    log.info("Synthesis responded in %.0f ms", elapsed_ms)
+
+    return response.choices[0].message.content or "I couldn't summarize that result."

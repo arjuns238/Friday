@@ -24,6 +24,9 @@ dependencies = [
     "tavily-python>=0.3.0",
     # TTS
     "elevenlabs>=1.2.0",
+    # LangGraph orchestration + conversation memory
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-sqlite>=2.0.0",
     # Utilities
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",

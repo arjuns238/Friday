@@ -1,15 +1,16 @@
-"""Audio capture — push-to-talk mode.
+"""Audio capture — always-on VAD mode with mute support.
 
-Records while the hotkey is held, stops when it's released.
-A threading.Event signals the stop; the caller sets it on key release.
-No VAD, no webrtcvad dependency.
+Listens continuously using energy-based VAD. Returns one speech segment at a
+time. Supports a mute_event that silences mic input without stopping the loop.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import struct
 import threading
-import time
+from typing import Optional
 
 from friday import config
 
@@ -17,27 +18,117 @@ log = logging.getLogger(__name__)
 
 _FRAME_MS = 30
 _FRAME_SAMPLES = config.AUDIO_SAMPLE_RATE * _FRAME_MS // 1000  # 480 @ 16kHz
+_SILENCE_FRAME = bytes(_FRAME_SAMPLES * 2)  # all-zero int16 frame
 
 
-async def record_audio(stop_event: threading.Event) -> bytes:
-    """Record until stop_event is set (hotkey released). Returns raw PCM bytes."""
-    log.debug("Audio recording started (push-to-talk)")
-    t0 = time.monotonic()
-
-    frames = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: _record_sync(stop_event)
-    )
-
-    elapsed = time.monotonic() - t0
-    log.debug("Recorded %.2fs of audio (%d frames)", elapsed, len(frames))
-    return b"".join(frames)
+def _rms(data: bytes) -> float:
+    n = len(data) // 2
+    if n == 0:
+        return 0.0
+    samples = struct.unpack(f"{n}h", data)
+    return math.sqrt(sum(s * s for s in samples) / n)
 
 
-def _record_sync(stop_event: threading.Event) -> list[bytes]:
-    """Blocking record loop. Exits when stop_event is set or max duration hit."""
+def _barge_in_sync(
+    stop_event: threading.Event,
+    mute_event: threading.Event,
+    onset_event: threading.Event,
+    cancel_event: threading.Event,
+) -> Optional[bytes]:
+    """Barge-in VAD: waits for speech onset during TTS playback, then records until silence.
+
+    Faster onset than the main VAD (3 frames ≈ 90ms) so interruptions feel instant.
+    cancel_event: set by caller when afplay finishes naturally — exits before onset.
+    onset_event:  set here when speech detected — caller kills afplay.
+    """
     import sounddevice as sd
 
-    frames: list[bytes] = []
+    pre_roll: list[bytes] = []
+    recording: list[bytes] = []
+    speech_frames = 0
+    silence_frames = 0
+    in_speech = False
+    max_frames = (config.MAX_RECORDING_SECONDS * 1000) // _FRAME_MS
+    _BARGE_ONSET = 3  # frames: faster detection for natural interruption feel
+
+    with sd.RawInputStream(
+        samplerate=config.AUDIO_SAMPLE_RATE,
+        channels=config.AUDIO_CHANNELS,
+        dtype="int16",
+        blocksize=_FRAME_SAMPLES,
+    ) as stream:
+        while not stop_event.is_set():
+            if not in_speech and cancel_event.is_set():
+                break
+
+            data, overflowed = stream.read(_FRAME_SAMPLES)
+            if overflowed:
+                log.warning("Barge-in overflow")
+
+            frame = _SILENCE_FRAME if mute_event.is_set() else bytes(data)
+            rms = _rms(frame)
+            is_speech = rms > config.VAD_SPEECH_THRESHOLD
+
+            if not in_speech:
+                pre_roll.append(frame)
+                if len(pre_roll) > config.VAD_PRE_ROLL_FRAMES:
+                    pre_roll.pop(0)
+
+                if is_speech:
+                    speech_frames += 1
+                    if speech_frames >= _BARGE_ONSET:
+                        in_speech = True
+                        recording = pre_roll.copy()
+                        pre_roll.clear()
+                        speech_frames = 0
+                        silence_frames = 0
+                        onset_event.set()
+                        log.debug("Barge-in onset (rms=%.0f)", rms)
+                else:
+                    speech_frames = max(0, speech_frames - 1)
+            else:
+                recording.append(frame)
+                if len(recording) >= max_frames:
+                    break
+                if not is_speech:
+                    silence_frames += 1
+                    if silence_frames >= config.VAD_OFFSET_FRAMES:
+                        log.debug("Barge-in segment complete")
+                        break
+                else:
+                    silence_frames = 0
+
+    if not recording:
+        return None
+    return b"".join(recording)
+
+
+async def listen_for_speech(
+    stop_event: threading.Event,
+    mute_event: threading.Event,
+) -> Optional[bytes]:
+    """Block until speech is detected, record until silence, return PCM bytes.
+
+    Returns None when stop_event is set before speech begins.
+    When mute_event is set, all frames are treated as silence so the VAD never
+    triggers — the loop still runs and stop_event is still respected.
+    """
+    return await asyncio.get_event_loop().run_in_executor(
+        None, lambda: _listen_sync(stop_event, mute_event)
+    )
+
+
+def _listen_sync(
+    stop_event: threading.Event,
+    mute_event: threading.Event,
+) -> Optional[bytes]:
+    import sounddevice as sd
+
+    pre_roll: list[bytes] = []
+    recording: list[bytes] = []
+    speech_frames = 0
+    silence_frames = 0
+    in_speech = False
     max_frames = (config.MAX_RECORDING_SECONDS * 1000) // _FRAME_MS
 
     with sd.RawInputStream(
@@ -46,12 +137,50 @@ def _record_sync(stop_event: threading.Event) -> list[bytes]:
         dtype="int16",
         blocksize=_FRAME_SAMPLES,
     ) as stream:
-        for _ in range(max_frames):
-            if stop_event.is_set():
-                break
+        while not stop_event.is_set():
             data, overflowed = stream.read(_FRAME_SAMPLES)
             if overflowed:
                 log.warning("Audio input overflow")
-            frames.append(bytes(data))
 
-    return frames
+            frame = _SILENCE_FRAME if mute_event.is_set() else bytes(data)
+            rms = _rms(frame)
+            is_speech = rms > config.VAD_SPEECH_THRESHOLD
+
+            if not in_speech:
+                # Maintain a rolling pre-roll buffer
+                pre_roll.append(frame)
+                if len(pre_roll) > config.VAD_PRE_ROLL_FRAMES:
+                    pre_roll.pop(0)
+
+                if is_speech:
+                    speech_frames += 1
+                    if speech_frames >= config.VAD_ONSET_FRAMES:
+                        in_speech = True
+                        recording = pre_roll.copy()
+                        pre_roll.clear()
+                        speech_frames = 0
+                        silence_frames = 0
+                        log.debug("Speech onset (rms=%.0f)", rms)
+                else:
+                    speech_frames = max(0, speech_frames - 1)
+
+            else:
+                recording.append(frame)
+
+                if len(recording) >= max_frames:
+                    log.warning("Max recording duration hit, forcing end of segment")
+                    break
+
+                if not is_speech:
+                    silence_frames += 1
+                    if silence_frames >= config.VAD_OFFSET_FRAMES:
+                        log.debug("Silence offset detected, segment complete")
+                        break
+                else:
+                    silence_frames = 0
+
+    if not recording:
+        return None
+
+    log.debug("Speech segment: %.0fms (%d frames)", len(recording) * _FRAME_MS, len(recording))
+    return b"".join(recording)

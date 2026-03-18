@@ -1,7 +1,8 @@
 """macOS menu bar app — the top-level entry point.
 
 Uses rumps for the menu bar and pynput for the global hotkey.
-Toggle mode: press hotkey to start recording, press again to stop.
+Toggle mode: press hotkey to start/stop the always-on listening loop.
+Mute key: silences mic input without stopping the loop.
 """
 from __future__ import annotations
 
@@ -13,12 +14,13 @@ from typing import Optional
 import rumps
 
 from friday import config
-from friday.pipeline import Pipeline
 
 log = logging.getLogger(__name__)
 
 _STATE_ICONS = {
     "idle": "🎙",
+    "listening": "👂",
+    "muted": "🔇",
     "recording": "🔴",
     "processing": "⏳",
     "speaking": "🔊",
@@ -35,20 +37,33 @@ class FridayApp(rumps.App):
             title=_STATE_ICONS["idle"],
             quit_button="Quit Friday",
         )
-        self._pipeline = Pipeline(on_state_change=self._on_state_change)
         self._running = False
         self._stop_event: Optional[threading.Event] = None
+        self._mute_event = threading.Event()   # set = muted
+        self._muted = False
+        self._pipeline_state = "idle"
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         self._loop_thread = threading.Thread(target=self._start_loop, daemon=True)
         self._loop_thread.start()
 
         self._hotkey_listener = _build_hotkey_listener(
-            on_toggle=self._on_hotkey_toggle,
+            key_combo=config.HOTKEY,
+            on_trigger=self._on_hotkey_toggle,
         )
         self._hotkey_listener.start()
 
-        log.info("Friday started — press %s to toggle recording", config.HOTKEY)
+        self._mute_listener = _build_hotkey_listener(
+            key_combo=config.MUTE_KEY,
+            on_trigger=self._on_mute_toggle,
+        )
+        self._mute_listener.start()
+
+        log.info(
+            "Friday started — %s to toggle listening, %s to toggle mute",
+            config.HOTKEY,
+            config.MUTE_KEY,
+        )
 
     @rumps.clicked("About Friday")
     def about(self, _):
@@ -56,7 +71,8 @@ class FridayApp(rumps.App):
             title="Friday",
             message=(
                 f"Voice-first AI orchestrator\n"
-                f"Press {config.HOTKEY} to start/stop recording\n"
+                f"Press {config.HOTKEY} to start/stop listening\n"
+                f"Press {config.MUTE_KEY} to toggle mute\n"
                 f"Model: {config.LLM_PROVIDER}"
             ),
         )
@@ -68,24 +84,60 @@ class FridayApp(rumps.App):
 
     def _on_hotkey_toggle(self) -> None:
         if self._running:
+            log.info("Stopping always-on loop")
             if self._stop_event:
                 self._stop_event.set()
         else:
+            log.info("Starting always-on loop")
             self._running = True
             self._stop_event = threading.Event()
             asyncio.run_coroutine_threadsafe(
                 self._run_pipeline(self._stop_event), self._loop
             )
 
+    def _on_mute_toggle(self) -> None:
+        if self._muted:
+            self._mute_event.clear()
+            self._muted = False
+            log.info("Mic unmuted")
+        else:
+            self._mute_event.set()
+            self._muted = True
+            log.info("Mic muted")
+        self._refresh_title()
+
     async def _run_pipeline(self, stop_event: threading.Event) -> None:
+        from datetime import date
+        from friday.graph import build_graph
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
         try:
-            await self._pipeline.run(stop_event)
+            async with AsyncSqliteSaver.from_conn_string(str(config.DB_PATH)) as checkpointer:
+                graph = build_graph(checkpointer)
+                await graph.ainvoke(
+                    {"done": False},
+                    config={
+                        "configurable": {
+                            "thread_id": date.today().isoformat(),
+                            "stop_event": stop_event,
+                            "mute_event": self._mute_event,
+                            "on_state_change": self._on_state_change,
+                        }
+                    },
+                )
         finally:
             self._running = False
             self._stop_event = None
 
     def _on_state_change(self, state: str) -> None:
-        self.title = _STATE_ICONS.get(state, _STATE_ICONS["idle"])
+        self._pipeline_state = state
+        self._refresh_title()
+
+    def _refresh_title(self) -> None:
+        if self._muted and self._pipeline_state in ("idle", "listening"):
+            self.title = _STATE_ICONS["muted"]
+        else:
+            self.title = _STATE_ICONS.get(self._pipeline_state, _STATE_ICONS["idle"])
 
 
 # macOS virtual key codes — physical key identity, unaffected by modifier keys
@@ -100,7 +152,7 @@ _MACOS_CHAR_VK: dict[str, int] = {
 }
 
 
-def _build_hotkey_listener(on_toggle):
+def _build_hotkey_listener(key_combo: str, on_trigger):
     from pynput import keyboard
 
     _MOD_MAP = {
@@ -115,10 +167,10 @@ def _build_hotkey_listener(on_toggle):
         "f3": keyboard.Key.f3, "f4": keyboard.Key.f4, "f5": keyboard.Key.f5,
     }
 
-    parts = [p.strip().lower() for p in config.HOTKEY.split("+")]
+    parts = [p.strip().lower() for p in key_combo.split("+")]
     modifier_keys: set = set()
-    char_vks: set = set()        # vk ints for regular char keys
-    special_keys: set = set()    # Key enum for non-modifier special keys
+    char_vks: set = set()
+    special_keys: set = set()
 
     for part in parts:
         if part in _MOD_MAP:
@@ -133,7 +185,10 @@ def _build_hotkey_listener(on_toggle):
         else:
             log.warning("Unknown hotkey part: %r", part)
 
-    log.info("Hotkey: mods=%s vks=%s special=%s", modifier_keys, char_vks, special_keys)
+    log.info(
+        "Hotkey %r: mods=%s vks=%s special=%s",
+        key_combo, modifier_keys, char_vks, special_keys,
+    )
 
     class _Listener(keyboard.Listener):
         def __init__(self):
@@ -152,15 +207,12 @@ def _build_hotkey_listener(on_toggle):
                 else:
                     self._current_special.add(key)
 
-            log.debug("press: %r | mods=%r vks=%r", key, self._current_mods, self._current_vks)
-
             if (modifier_keys.issubset(self._current_mods)
                     and char_vks.issubset(self._current_vks)
                     and special_keys.issubset(self._current_special | self._current_mods)
                     and not self._held):
                 self._held = True
-                log.info("Hotkey fired — toggling")
-                on_toggle()
+                on_trigger()
 
         def _on_release(self, key):
             if isinstance(key, keyboard.Key):

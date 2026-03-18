@@ -41,15 +41,28 @@ def main() -> None:
         if cmd == "test-pipeline":
             import asyncio
             import threading
-            from friday.pipeline import Pipeline
+            from datetime import date
+            from friday.graph import build_graph
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
             async def _test():
                 stop = threading.Event()
-                p = Pipeline(on_state_change=lambda s: print(f"  state: {s}"))
-                # Auto-stop recording after 5s (simulates releasing the hotkey)
-                asyncio.get_event_loop().call_later(5, stop.set)
-                print("  Speak now... (recording stops after 5s or press Ctrl+C)")
-                await p.run(stop)
+                mute = threading.Event()
+                asyncio.get_event_loop().call_later(30, stop.set)
+                print("  Speak now... (auto-stops after 30s or press Ctrl+C)")
+                async with AsyncSqliteSaver.from_conn_string(str(config.DB_PATH)) as checkpointer:
+                    graph = build_graph(checkpointer)
+                    await graph.ainvoke(
+                        {"done": False},
+                        config={
+                            "configurable": {
+                                "thread_id": date.today().isoformat(),
+                                "stop_event": stop,
+                                "mute_event": mute,
+                                "on_state_change": lambda s: print(f"  state: {s}"),
+                            }
+                        },
+                    )
 
             print("Running one pipeline invocation...")
             asyncio.run(_test())

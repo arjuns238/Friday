@@ -18,15 +18,19 @@ TOOL_DEFINITIONS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "thinking": {
+                        "type": "string",
+                        "description": "Natural, brief phrase to say aloud before executing. e.g. 'On it', 'Let me send that over'. Keep under 8 words.",
+                    },
                     "prompt": {
                         "type": "string",
                         "description": (
                             "The exact prompt to inject into Claude Code. "
                             "Should be specific, actionable, and reference the code context visible in the screenshot."
                         ),
-                    }
+                    },
                 },
-                "required": ["prompt"],
+                "required": ["thinking", "prompt"],
             },
         },
     },
@@ -41,6 +45,10 @@ TOOL_DEFINITIONS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "thinking": {
+                        "type": "string",
+                        "description": "Natural, brief phrase to say aloud before executing. e.g. 'Let me draft that email'. Keep under 8 words.",
+                    },
                     "to": {
                         "type": "string",
                         "description": "Recipient email address, extracted from context or inferred from user speech.",
@@ -57,7 +65,7 @@ TOOL_DEFINITIONS: list[dict] = [
                         ),
                     },
                 },
-                "required": ["to", "subject", "body_instructions"],
+                "required": ["thinking", "to", "subject", "body_instructions"],
             },
         },
     },
@@ -72,12 +80,16 @@ TOOL_DEFINITIONS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "thinking": {
+                        "type": "string",
+                        "description": "Natural, brief phrase to say aloud before searching. e.g. 'Let me look that up', 'Let me check on that'. Keep under 8 words.",
+                    },
                     "query": {
                         "type": "string",
                         "description": "Search query string, optimized for web search.",
-                    }
+                    },
                 },
-                "required": ["query"],
+                "required": ["thinking", "query"],
             },
         },
     },
@@ -106,6 +118,8 @@ TOOL_DEFINITIONS: list[dict] = [
 
 async def dispatch_tool(name: str, arguments: dict[str, Any]) -> str:
     """Dispatch a tool call by name and return a string result."""
+    arguments = {k: v for k, v in arguments.items() if k != "thinking"}
+
     if name == "inject_claude_code":
         from friday.tools.claude_code import inject_into_claude_code
         return inject_into_claude_code(arguments["prompt"])

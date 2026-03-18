@@ -19,7 +19,9 @@ TAVILY_API_KEY: str = os.environ.get("TAVILY_API_KEY", "")
 
 # ── Hotkey ────────────────────────────────────────────────────────────────────
 # Parsed by app.py into pynput key combos
-HOTKEY: str = os.environ.get("FRIDAY_HOTKEY", "option+f")
+HOTKEY: str = os.environ.get("FRIDAY_HOTKEY", "ctrl+g")
+# Mute toggle key — silences mic without stopping the always-on loop
+MUTE_KEY: str = os.environ.get("FRIDAY_MUTE_KEY", "ctrl+shift+g")
 
 # ── Voice / TTS ───────────────────────────────────────────────────────────────
 # ElevenLabs voice ID — default: "Rachel" (21m00Tcm4TlvDq8ikWAM)
@@ -32,6 +34,15 @@ AUDIO_SAMPLE_RATE: int = 16_000
 AUDIO_CHANNELS: int = 1
 # Maximum recording duration in seconds (safety cap)
 MAX_RECORDING_SECONDS: int = 30
+# VAD: RMS energy threshold for speech detection (int16 range 0–32768).
+# Raise if false triggers on background noise; lower if quiet speech is missed.
+VAD_SPEECH_THRESHOLD: int = int(os.environ.get("FRIDAY_VAD_THRESHOLD", "400"))
+# Consecutive speech frames required to confirm onset (~150ms at 30ms/frame)
+VAD_ONSET_FRAMES: int = int(os.environ.get("FRIDAY_VAD_ONSET_FRAMES", "5"))
+# Consecutive silence frames required to end segment (~300ms)
+VAD_OFFSET_FRAMES: int = int(os.environ.get("FRIDAY_VAD_OFFSET_FRAMES", "15"))
+# Frames kept before speech onset (pre-roll, ~300ms)
+VAD_PRE_ROLL_FRAMES: int = 10
 
 # ── Screenshot ────────────────────────────────────────────────────────────────
 SCREENSHOT_MAX_KB: int = int(os.environ.get("FRIDAY_SCREENSHOT_MAX_KB", "400"))
@@ -76,6 +87,7 @@ FRIDAY_DIR: Path = Path.home() / ".friday"
 FRIDAY_DIR.mkdir(exist_ok=True)
 GOOGLE_CREDS_PATH: Path = FRIDAY_DIR / "google_creds.json"
 CLAUDE_PIPE_PATH: Path = FRIDAY_DIR / "claude_input.pipe"
+DB_PATH: Path = FRIDAY_DIR / "memory.db"   # conversation history (AsyncSqliteSaver)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = os.environ.get("FRIDAY_LOG_LEVEL", "INFO")
