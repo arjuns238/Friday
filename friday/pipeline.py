@@ -1,9 +1,8 @@
 """Main invocation pipeline — orchestrates all stages from hotkey to spoken response.
 
 Flow:
-  hotkey press
-    → screenshot (parallel with audio capture start)
-    → audio capture (VAD auto-stop)
+  hotkey hold  → screenshot + audio capture start
+  hotkey release → audio stops, transcription begins
     → Deepgram transcription
     → LLM vision + tool routing (Gemini 2.0 Flash by default)
     → tool execution
@@ -15,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Callable, Optional
 
@@ -33,13 +33,13 @@ class Pipeline:
         """
         self._on_state = on_state_change or (lambda s: None)
 
-    async def run(self) -> None:
-        """Execute one full invocation. Called when hotkey is pressed."""
+    async def run(self, stop_event: threading.Event) -> None:
+        """Execute one full invocation. stop_event is set when hotkey is released."""
         t_total = time.monotonic()
         log.info("=== Friday invocation started ===")
 
         try:
-            await self._run_inner()
+            await self._run_inner(stop_event)
         except Exception as exc:
             log.exception("Pipeline error: %s", exc)
             self._on_state("idle")
@@ -50,16 +50,16 @@ class Pipeline:
         elapsed = (time.monotonic() - t_total) * 1000
         log.info("=== Invocation complete in %.0f ms ===", elapsed)
 
-    async def _run_inner(self) -> None:
-        # ── Stage 1: Screenshot (fire immediately on hotkey) ─────────────────
+    async def _run_inner(self, stop_event: threading.Event) -> None:
+        # ── Stage 1: Screenshot (fire immediately on hotkey press) ────────────
         t0 = time.monotonic()
         screenshot_task = asyncio.create_task(self._take_screenshot())
 
-        # ── Stage 2: Audio capture ─────────────────────────────────────────
+        # ── Stage 2: Audio capture (runs until hotkey released) ───────────────
         self._on_state("recording")
         from friday.capture.audio import record_audio
 
-        audio_bytes = await record_audio()
+        audio_bytes = await record_audio(stop_event)
         t_audio = time.monotonic()
         log.info("Stage audio: %.0f ms (%d bytes)", (t_audio - t0) * 1000, len(audio_bytes))
 

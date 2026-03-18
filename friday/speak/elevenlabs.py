@@ -6,12 +6,8 @@ Target: first audio byte within 200ms of calling speak().
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
-import queue
-import threading
 import time
-from typing import Iterator
 
 from friday import config
 
@@ -38,50 +34,21 @@ async def speak(text: str) -> None:
 
 
 def _speak_sync(text: str) -> None:
-    """Blocking: stream ElevenLabs audio and play via sounddevice."""
-    from elevenlabs import VoiceSettings
+    """Blocking: get ElevenLabs audio and play via afplay."""
     from elevenlabs.client import ElevenLabs
-    import sounddevice as sd
-    import numpy as np
 
     client = ElevenLabs(api_key=config.ELEVENLABS_API_KEY)
 
-    # Stream audio from ElevenLabs
-    audio_stream = client.text_to_speech.convert_as_stream(
-        text=text,
+    audio_stream = client.text_to_speech.stream(
         voice_id=config.ELEVENLABS_VOICE_ID,
-        model_id="eleven_flash_v2_5",  # lowest latency model
-        voice_settings=VoiceSettings(
-            stability=0.5,
-            similarity_boost=0.8,
-            style=0.0,
-            use_speaker_boost=True,
-        ),
+        text=text,
+        model_id="eleven_flash_v2_5",
+        optimize_streaming_latency=4,
         output_format="mp3_44100_128",
     )
 
-    # Collect all audio chunks into a buffer, then decode and play
-    audio_bytes = b"".join(chunk for chunk in audio_stream if chunk)
-    _play_mp3_bytes(audio_bytes)
-
-
-def _play_mp3_bytes(mp3_bytes: bytes) -> None:
-    """Decode MP3 bytes and play via sounddevice."""
-    import sounddevice as sd
-    import numpy as np
-
-    try:
-        from pydub import AudioSegment
-        audio = AudioSegment.from_mp3(io.BytesIO(mp3_bytes))
-        samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
-        samples /= 2 ** (audio.sample_width * 8 - 1)  # normalize to [-1, 1]
-        if audio.channels == 2:
-            samples = samples.reshape((-1, 2))
-        sd.play(samples, samplerate=audio.frame_rate)
-        sd.wait()
-    except ImportError:
-        # pydub not available — save to temp file and use afplay
-        _play_via_afplay(mp3_bytes)
+    audio_bytes = b"".join(chunk for chunk in audio_stream if isinstance(chunk, bytes))
+    _play_via_afplay(audio_bytes)
 
 
 def _play_via_afplay(mp3_bytes: bytes) -> None:

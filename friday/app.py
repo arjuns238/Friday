@@ -1,7 +1,7 @@
 """macOS menu bar app — the top-level entry point.
 
 Uses rumps for the menu bar and pynput for the global hotkey.
-Hotkey triggers the async pipeline in a background thread.
+Push-to-talk: hold hotkey to record, release to process.
 """
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from friday.pipeline import Pipeline
 
 log = logging.getLogger(__name__)
 
-# Menu bar title characters for each state
 _STATE_ICONS = {
     "idle": "🎙",
     "recording": "🔴",
@@ -38,19 +37,19 @@ class FridayApp(rumps.App):
         )
         self._pipeline = Pipeline(on_state_change=self._on_state_change)
         self._running = False
+        self._stop_event: Optional[threading.Event] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-        # Start the asyncio event loop in a background thread
         self._loop_thread = threading.Thread(target=self._start_loop, daemon=True)
         self._loop_thread.start()
 
-        # Register global hotkey
-        self._hotkey_listener = _build_hotkey_listener(self._on_hotkey)
+        self._hotkey_listener = _build_hotkey_listener(
+            on_press=self._on_hotkey_press,
+            on_release=self._on_hotkey_release,
+        )
         self._hotkey_listener.start()
 
-        log.info("Friday started — hotkey: %s", config.HOTKEY)
-
-    # ── Menu items ────────────────────────────────────────────────────────────
+        log.info("Friday started — hold %s to speak", config.HOTKEY)
 
     @rumps.clicked("About Friday")
     def about(self, _):
@@ -58,51 +57,41 @@ class FridayApp(rumps.App):
             title="Friday",
             message=(
                 f"Voice-first AI orchestrator\n"
-                f"Hotkey: {config.HOTKEY}\n"
-                f"Model: {config.OPENAI_MODEL}"
+                f"Hold {config.HOTKEY} to speak\n"
+                f"Model: {config.LLM_PROVIDER}"
             ),
         )
 
-    @rumps.clicked("Test Microphone")
-    def test_mic(self, _):
-        self._invoke_pipeline()
-
-    # ── Internal ──────────────────────────────────────────────────────────────
-
     def _start_loop(self) -> None:
-        """Run asyncio event loop in background thread."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _on_hotkey(self) -> None:
-        """Called from pynput thread when hotkey is pressed."""
+    def _on_hotkey_press(self) -> None:
         if self._running:
-            log.debug("Hotkey pressed but pipeline already running — ignored")
-            return
-        self._invoke_pipeline()
-
-    def _invoke_pipeline(self) -> None:
-        """Submit pipeline coroutine to background event loop."""
-        if self._loop is None:
             return
         self._running = True
-        asyncio.run_coroutine_threadsafe(self._run_pipeline(), self._loop)
+        self._stop_event = threading.Event()
+        asyncio.run_coroutine_threadsafe(
+            self._run_pipeline(self._stop_event), self._loop
+        )
 
-    async def _run_pipeline(self) -> None:
+    def _on_hotkey_release(self) -> None:
+        if self._stop_event:
+            self._stop_event.set()
+
+    async def _run_pipeline(self, stop_event: threading.Event) -> None:
         try:
-            await self._pipeline.run()
+            await self._pipeline.run(stop_event)
         finally:
             self._running = False
+            self._stop_event = None
 
     def _on_state_change(self, state: str) -> None:
-        """Update menu bar icon to reflect current pipeline state."""
-        icon = _STATE_ICONS.get(state, _STATE_ICONS["idle"])
-        self.title = icon
+        self.title = _STATE_ICONS.get(state, _STATE_ICONS["idle"])
 
 
-def _parse_hotkey(hotkey_str: str):
-    """Parse hotkey string like 'cmd+option+space' into pynput Key combo."""
+def _parse_hotkey(hotkey_str: str) -> frozenset:
     from pynput import keyboard
 
     _KEY_MAP = {
@@ -135,45 +124,41 @@ def _parse_hotkey(hotkey_str: str):
     return frozenset(keys)
 
 
-def _build_hotkey_listener(callback):
-    """Build a pynput GlobalHotKeys listener."""
+def _build_hotkey_listener(on_press, on_release):
     from pynput import keyboard
 
     hotkey_combo = _parse_hotkey(config.HOTKEY)
-
     current_keys: set = set()
 
     class _Listener(keyboard.Listener):
         def __init__(self):
             super().__init__(on_press=self._on_press, on_release=self._on_release)
-            self._fired = False
+            self._held = False
 
         def _on_press(self, key):
             current_keys.add(key)
-            if hotkey_combo.issubset(current_keys) and not self._fired:
-                self._fired = True
-                log.debug("Hotkey triggered")
-                callback()
+            if hotkey_combo.issubset(current_keys) and not self._held:
+                self._held = True
+                on_press()
 
         def _on_release(self, key):
+            if self._held and key in hotkey_combo:
+                self._held = False
+                on_release()
             current_keys.discard(key)
-            if not hotkey_combo.issubset(current_keys):
-                self._fired = False
 
     return _Listener()
 
 
 def run() -> None:
-    """Start the menu bar app. Blocks until quit."""
-    # Validate config
     missing = config.validate_phase0()
     if missing:
         rumps.alert(
             title="Friday — Missing API Keys",
             message=(
-                f"Missing required environment variables:\n"
+                "Missing required environment variables:\n"
                 + "\n".join(f"  • {k}" for k in missing)
-                + f"\n\nCopy .env.example to .env and fill in your keys."
+                + "\n\nCopy .env.example to .env and fill in your keys."
             ),
         )
 

@@ -8,9 +8,8 @@ dependencies = [
     "rumps>=0.4.0",
     # Hotkey
     "pynput>=1.7.7",
-    # Audio capture + VAD
+    # Audio capture (push-to-talk, no VAD needed)
     "sounddevice>=0.4.6",
-    "webrtcvad>=2.0.10",
     "numpy>=1.26",
     # STT
     "deepgram-sdk>=3.0.0",
@@ -28,9 +27,8 @@ dependencies = [
     # Utilities
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
-    # Screenshot (macOS only, install separately via pip)
-    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
-    "pyobjc-framework-AppKit>=10.0; sys_platform == 'darwin'",
+    # Screenshot (macOS only)
+    "pyobjc>=9.0; sys_platform == 'darwin'",
     "Pillow>=10.0.0",
 ]
 

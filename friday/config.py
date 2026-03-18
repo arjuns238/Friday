@@ -24,17 +24,10 @@ HOTKEY: str = os.environ.get("FRIDAY_HOTKEY", "cmd+option+space")
 # ── Voice / TTS ───────────────────────────────────────────────────────────────
 # ElevenLabs voice ID — default: "Rachel" (21m00Tcm4TlvDq8ikWAM)
 ELEVENLABS_VOICE_ID: str = os.environ.get(
-    "FRIDAY_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"
+    "FRIDAY_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"  # Bella (premade, free tier)
 )
 
-# ── VAD / audio ───────────────────────────────────────────────────────────────
-# webrtcvad aggressiveness 0-3 (higher = more aggressive silence detection)
-VAD_AGGRESSIVENESS: int = int(os.environ.get("FRIDAY_VAD_AGGRESSIVENESS", "2"))
-# ms of trailing silence before recording stops
-VAD_TRAILING_SILENCE_MS: int = int(
-    os.environ.get("FRIDAY_VAD_TRAILING_SILENCE_MS", "700")
-)
-# sample rate for audio capture (webrtcvad supports 8k/16k/32k/48k)
+# ── Audio ─────────────────────────────────────────────────────────────────────
 AUDIO_SAMPLE_RATE: int = 16_000
 AUDIO_CHANNELS: int = 1
 # Maximum recording duration in seconds (safety cap)
@@ -51,7 +44,7 @@ LLM_PROVIDER: str = os.environ.get("FRIDAY_LLM", "gemini")
 
 _LLM_CONFIGS: dict[str, dict] = {
     "gemini": {
-        "model":    "gemini-2.0-flash",
+        "model":    "gemini-3.1-flash-lite-preview",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "api_key":  lambda: GOOGLE_API_KEY,
     },

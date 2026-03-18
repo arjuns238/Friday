@@ -39,15 +39,19 @@ def main() -> None:
             return
 
         if cmd == "test-pipeline":
-            # Quick sanity check without the menu bar
             import asyncio
+            import threading
             from friday.pipeline import Pipeline
 
             async def _test():
+                stop = threading.Event()
                 p = Pipeline(on_state_change=lambda s: print(f"  state: {s}"))
-                await p.run()
+                # Auto-stop recording after 5s (simulates releasing the hotkey)
+                asyncio.get_event_loop().call_later(5, stop.set)
+                print("  Speak now... (recording stops after 5s or press Ctrl+C)")
+                await p.run(stop)
 
-            print("Running one pipeline invocation (speak after hotkey)...")
+            print("Running one pipeline invocation...")
             asyncio.run(_test())
             return
 

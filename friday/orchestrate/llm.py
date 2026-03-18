@@ -1,7 +1,7 @@
 """LLM orchestrator — routes voice + screenshot to the right tool.
 
 Provider is controlled by FRIDAY_LLM in .env:
-  FRIDAY_LLM=gemini   → Gemini 2.0 Flash via Google's OpenAI-compatible endpoint (default)
+  FRIDAY_LLM=gemini   → gemini-3.1-flash-lite-preview via Google's OpenAI-compatible endpoint (default)
   FRIDAY_LLM=openai   → GPT-4o
   FRIDAY_LLM=claude   → Claude Haiku 4.5
 
