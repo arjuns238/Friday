@@ -77,7 +77,7 @@ friday
 python -m friday
 ```
 
-The 🎙 icon appears in your menu bar. Press `Cmd+Option+Space` to invoke.
+The 🎙 icon appears in your menu bar. Hold `F2` to speak, release to process.
 
 ---
 

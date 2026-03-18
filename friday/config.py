@@ -19,7 +19,7 @@ TAVILY_API_KEY: str = os.environ.get("TAVILY_API_KEY", "")
 
 # ── Hotkey ────────────────────────────────────────────────────────────────────
 # Parsed by app.py into pynput key combos
-HOTKEY: str = os.environ.get("FRIDAY_HOTKEY", "cmd+option+space")
+HOTKEY: str = os.environ.get("FRIDAY_HOTKEY", "f2")
 
 # ── Voice / TTS ───────────────────────────────────────────────────────────────
 # ElevenLabs voice ID — default: "Rachel" (21m00Tcm4TlvDq8ikWAM)
