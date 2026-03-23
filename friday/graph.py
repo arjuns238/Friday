@@ -365,4 +365,10 @@ async def _build_spoken_response(transcript: str, tool_name: str, result: str) -
     if tool_name == "web_search":
         from friday.orchestrate.llm import synthesize_response
         return await synthesize_response(transcript, result)
+    if tool_name == "desktop_query":
+        return result  # subagent already produces natural spoken answer
+    if tool_name == "open_file":
+        if "not found" in result.lower() or "failed" in result.lower():
+            return f"I couldn't open that. {result}"
+        return result
     return result

@@ -96,6 +96,61 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "desktop_query",
+            "description": (
+                "Search and reason over files, photos, and data on the user's Mac. "
+                "Use for: finding files, answering questions about personal data, "
+                "opening files, photo location queries, download history, etc. "
+                "Examples: 'find my resume', 'screenshots from yesterday', "
+                "'what did I download last week', 'pictures of the beach'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thinking": {
+                        "type": "string",
+                        "description": "Brief phrase to say aloud while searching. e.g. 'Let me look through your files'. Keep under 8 words.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "The user's query about their local files/data.",
+                    },
+                },
+                "required": ["thinking", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_file",
+            "description": (
+                "Open a file or reveal in Finder. Use when the file path is already known "
+                "from a previous desktop_query result or conversation history."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thinking": {
+                        "type": "string",
+                        "description": "Brief phrase to say aloud. e.g. 'Opening that now'. Keep under 8 words.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute file path to open.",
+                    },
+                    "reveal": {
+                        "type": "boolean",
+                        "description": "If true, reveal in Finder instead of opening. Default false.",
+                    },
+                },
+                "required": ["thinking", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "speak_answer",
             "description": (
                 "Speak a direct answer to the user without invoking another tool. "
@@ -135,6 +190,15 @@ async def dispatch_tool(name: str, arguments: dict[str, Any]) -> str:
     elif name == "web_search":
         from friday.tools.search import web_search
         return await web_search(arguments["query"])
+
+    elif name == "desktop_query":
+        from friday.tools.desktop import DesktopAgent
+        agent = DesktopAgent()
+        return await agent.run(arguments["query"])
+
+    elif name == "open_file":
+        from friday.tools.desktop import open_file
+        return open_file(arguments["path"], arguments.get("reveal", False))
 
     elif name == "speak_answer":
         # Just return the answer — pipeline.py handles TTS

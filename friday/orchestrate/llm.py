@@ -26,6 +26,10 @@ Your job: decide which tool to call based on what you see and hear.
 Decision rules:
 - If the screenshot shows a terminal with Claude Code running, and the user is asking about code → inject_claude_code
 - If the screenshot shows Gmail/Outlook, or the user says "email" / "write to" / "reply" → draft_gmail
+- If the user asks about local files, photos, documents, or personal data on their Mac → desktop_query
+  Examples: "find", "where is", "show me", "look for", "open [vague]", "where did I go",
+  "what did I download", "pictures of", "that PDF about", "screenshots from", "my resume"
+- For "open the first one" / "open the second one" after a desktop_query → open_file with the path from conversation history
 - Use web_search when you feel you need to look something up or when you don't have the necessary information to respond accurately (e.g. current events, recent releases, prices, unknown facts). If you can answer confidently from what's visible on screen or general knowledge, use speak_answer instead.
 - For everything else (factual questions, explanations, reasoning about visible content, opinions) → speak_answer
 
