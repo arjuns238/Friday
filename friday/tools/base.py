@@ -132,9 +132,7 @@ TOOL_DEFINITIONS: list[dict] = [
                     },
                 },
                 "required": ["thinking"],
-            },
         },
-    },
     {
         "type": "function",
         "function": {
