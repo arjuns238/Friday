@@ -47,11 +47,6 @@ class FridayApp(rumps.App):
         self._loop_thread = threading.Thread(target=self._start_loop, daemon=True)
         self._loop_thread.start()
 
-        # Initialise CodingAgent with Friday's TTS function
-        from friday.speak.elevenlabs import speak
-        from friday.tools.claude_code import init_coding_agent
-        init_coding_agent(speak)
-
         self._hotkey_listener = _build_hotkey_listener(
             key_combo=config.HOTKEY,
             on_trigger=self._on_hotkey_toggle,

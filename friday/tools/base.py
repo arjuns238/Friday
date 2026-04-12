@@ -8,98 +8,6 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "inject_claude_code",
-            "description": (
-                "Dispatch a coding task to Claude Code. "
-                "Claude Code will work autonomously in the background and speak when done. "
-                "This tool returns immediately — Friday does not wait. "
-                "Use when the user's request is a coding task, refactor, bug fix, or "
-                "when the screenshot shows a terminal, VS Code, or code editor. "
-                "Formulate a clear, self-contained prompt that Claude Code can act on."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "thinking": {
-                        "type": "string",
-                        "description": (
-                            "Natural, brief phrase to say aloud before dispatching. "
-                            "e.g. 'On it', 'Spinning that up', 'Let me get Claude on that'. "
-                            "Keep under 8 words."
-                        ),
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": (
-                            "The exact prompt to send to Claude Code. "
-                            "Should be specific, actionable, and reference the code context "
-                            "visible in the screenshot."
-                        ),
-                    },
-                    "project_dir": {
-                        "type": "string",
-                        "description": (
-                            "Absolute path to the project directory for Claude Code to work in. "
-                            "Infer from the screenshot (terminal cwd, VS Code workspace, file paths). "
-                            "Falls back to CLAUDE_DEFAULT_PROJECT_DIR if not determinable."
-                        ),
-                    },
-                },
-                "required": ["thinking", "prompt", "project_dir"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "coding_agent_status",
-            "description": (
-                "Check what Claude Code is currently working on. "
-                "Use when the user asks 'what's Claude doing', 'what's it working on', "
-                "'is Claude done', 'what's the status'."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "thinking": {
-                        "type": "string",
-                        "description": "Brief phrase to say aloud. e.g. 'Let me check'. Keep under 8 words.",
-                    },
-                },
-                "required": ["thinking"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "cancel_coding_task",
-            "description": (
-                "Cancel an active Claude Code task. "
-                "Use when the user says 'stop', 'cancel', 'stop Claude', 'kill that task'."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "thinking": {
-                        "type": "string",
-                        "description": "Brief phrase to say aloud. e.g. 'Stopping that'. Keep under 8 words.",
-                    },
-                    "task_id": {
-                        "type": "string",
-                        "description": (
-                            "Specific task ID to cancel (optional). "
-                            "If omitted, cancels all active tasks."
-                        ),
-                    },
-                },
-                "required": ["thinking"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "draft_gmail",
             "description": (
                 "Draft an email (never auto-send). Use when the screenshot shows Gmail or Outlook, "
@@ -211,21 +119,7 @@ async def dispatch_tool(name: str, arguments: dict[str, Any]) -> str:
     """Dispatch a tool call by name and return a string result."""
     arguments = {k: v for k, v in arguments.items() if k != "thinking"}
 
-    if name == "inject_claude_code":
-        from friday import config
-        from friday.tools.claude_code import dispatch_claude_code
-        project_dir = arguments.get("project_dir") or config.CLAUDE_DEFAULT_PROJECT_DIR
-        return dispatch_claude_code(arguments["prompt"], project_dir)
-
-    elif name == "coding_agent_status":
-        from friday.tools.claude_code import coding_agent_status
-        return coding_agent_status()
-
-    elif name == "cancel_coding_task":
-        from friday.tools.claude_code import cancel_coding_task
-        return cancel_coding_task(arguments.get("task_id"))
-
-    elif name == "draft_gmail":
+    if name == "draft_gmail":
         from friday.tools.gmail import draft_gmail
         return await draft_gmail(
             to=arguments["to"],

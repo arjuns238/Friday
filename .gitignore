@@ -46,3 +46,6 @@ htmlcov/
 
 # uv
 uv.lock
+
+# Working Memory
+SCRATCHPAD.md

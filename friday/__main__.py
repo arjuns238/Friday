@@ -32,12 +32,9 @@ def main() -> None:
             import threading
             from datetime import date
             from friday.graph import build_graph
-            from friday.speak.elevenlabs import speak
-            from friday.tools.claude_code import init_coding_agent
             from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
             async def _test():
-                init_coding_agent(speak)
                 stop = threading.Event()
                 mute = threading.Event()
                 asyncio.get_event_loop().call_later(120, stop.set)

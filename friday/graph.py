@@ -370,11 +370,6 @@ def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict]:
 async def _build_spoken_response(transcript: str, tool_name: str, result: str) -> str:
     if tool_name == "speak_answer":
         return result
-    if tool_name == "inject_claude_code":
-        # result is already a user-facing dispatch message from dispatch_claude_code()
-        return result
-    if tool_name in ("coding_agent_status", "cancel_coding_task"):
-        return result
     if tool_name == "draft_gmail":
         return result
     if tool_name == "web_search":

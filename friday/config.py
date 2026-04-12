@@ -26,7 +26,7 @@ MUTE_KEY: str = os.environ.get("FRIDAY_MUTE_KEY", "ctrl+shift+g")
 # ── Voice / TTS ───────────────────────────────────────────────────────────────
 # ElevenLabs voice ID — default: "Rachel" (21m00Tcm4TlvDq8ikWAM)
 ELEVENLABS_VOICE_ID: str = os.environ.get(
-    "FRIDAY_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"  # Bella (premade, free tier)
+    "FRIDAY_VOICE_ID", "Xb7hH8MSUJpSbSDYk0k2"  # Alice — Clear, Engaging Educator
 )
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
@@ -81,14 +81,6 @@ def llm_config() -> dict:
         "base_url": cfg["base_url"],
         "api_key":  cfg["api_key"](),
     }
-
-# ── Claude Code Agent ─────────────────────────────────────────────────────────
-# Default project directory when the LLM can't infer it from context
-CLAUDE_DEFAULT_PROJECT_DIR: str = os.environ.get(
-    "CLAUDE_DEFAULT_PROJECT_DIR", str(Path.home())
-)
-# Permission mode: "default" | "acceptEdits" | "plan" | "bypassPermissions"
-CLAUDE_PERMISSION_MODE: str = os.environ.get("CLAUDE_PERMISSION_MODE", "acceptEdits")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 FRIDAY_DIR: Path = Path.home() / ".friday"
