@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from datetime import datetime
 from typing import Optional
 
 import rumps
@@ -16,6 +17,9 @@ import rumps
 from friday import config
 
 log = logging.getLogger(__name__)
+
+# Unique per process — prevents resuming previous session on restart
+_SESSION_ID = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
 _STATE_ICONS = {
     "idle": "🎙",
@@ -107,7 +111,7 @@ class FridayApp(rumps.App):
         self._refresh_title()
 
     async def _run_pipeline(self, stop_event: threading.Event) -> None:
-        from datetime import date
+        pass
         from friday.graph import build_graph
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -118,7 +122,7 @@ class FridayApp(rumps.App):
                     {"done": False},
                     config={
                         "configurable": {
-                            "thread_id": date.today().isoformat(),
+                            "thread_id": _SESSION_ID,
                             "stop_event": stop_event,
                             "mute_event": self._mute_event,
                             "on_state_change": self._on_state_change,

@@ -37,10 +37,15 @@ def _barge_in_sync(
 ) -> Optional[bytes]:
     """Barge-in VAD: waits for speech onset during TTS playback, then records until silence.
 
-    Faster onset than the main VAD (3 frames ≈ 90ms) so interruptions feel instant.
-    cancel_event: set by caller when afplay finishes naturally — exits before onset.
-    onset_event:  set here when speech detected — caller kills afplay.
+    Delegates to AVAudioEngine AEC backend to prevent self-interruption.
+    Falls back to sounddevice if AVFoundation is unavailable.
     """
+    try:
+        from friday.capture.audio_aec import _barge_in_sync_aec
+        return _barge_in_sync_aec(stop_event, mute_event, onset_event, cancel_event)
+    except ImportError:
+        log.warning("AVFoundation unavailable — falling back to sounddevice barge-in (no AEC)")
+
     import sounddevice as sd
 
     pre_roll: list[bytes] = []
@@ -122,6 +127,13 @@ def _listen_sync(
     stop_event: threading.Event,
     mute_event: threading.Event,
 ) -> Optional[bytes]:
+    """Delegates to AVAudioEngine AEC backend; falls back to sounddevice."""
+    try:
+        from friday.capture.audio_aec import _listen_sync_aec
+        return _listen_sync_aec(stop_event, mute_event)
+    except ImportError:
+        log.warning("AVFoundation unavailable — falling back to sounddevice (no AEC)")
+
     import sounddevice as sd
 
     pre_roll: list[bytes] = []

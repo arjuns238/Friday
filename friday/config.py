@@ -26,7 +26,7 @@ MUTE_KEY: str = os.environ.get("FRIDAY_MUTE_KEY", "ctrl+shift+g")
 # ── Voice / TTS ───────────────────────────────────────────────────────────────
 # ElevenLabs voice ID — default: "Rachel" (21m00Tcm4TlvDq8ikWAM)
 ELEVENLABS_VOICE_ID: str = os.environ.get(
-    "FRIDAY_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"  # Bella (premade, free tier)
+    "FRIDAY_VOICE_ID", "Xb7hH8MSUJpSbSDYk0k2"  # Alice — Clear, Engaging Educator
 )
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
@@ -36,11 +36,11 @@ AUDIO_CHANNELS: int = 1
 MAX_RECORDING_SECONDS: int = 30
 # VAD: RMS energy threshold for speech detection (int16 range 0–32768).
 # Raise if false triggers on background noise; lower if quiet speech is missed.
-VAD_SPEECH_THRESHOLD: int = int(os.environ.get("FRIDAY_VAD_THRESHOLD", "400"))
+VAD_SPEECH_THRESHOLD: int = int(os.environ.get("FRIDAY_VAD_THRESHOLD", "600"))
 # Consecutive speech frames required to confirm onset (~150ms at 30ms/frame)
 VAD_ONSET_FRAMES: int = int(os.environ.get("FRIDAY_VAD_ONSET_FRAMES", "5"))
 # Consecutive silence frames required to end segment (~300ms)
-VAD_OFFSET_FRAMES: int = int(os.environ.get("FRIDAY_VAD_OFFSET_FRAMES", "15"))
+VAD_OFFSET_FRAMES: int = int(os.environ.get("FRIDAY_VAD_OFFSET_FRAMES", "25"))
 # Frames kept before speech onset (pre-roll, ~300ms)
 VAD_PRE_ROLL_FRAMES: int = 10
 
@@ -70,6 +70,34 @@ _LLM_CONFIGS: dict[str, dict] = {
         "api_key":  lambda: os.environ.get("ANTHROPIC_API_KEY", ""),
     },
 }
+
+DESKTOP_LLM_PROVIDER: str = os.environ.get("FRIDAY_DESKTOP_LLM", "gemini")
+
+# Directories the desktop subagent is allowed to search (Spotlight scope)
+DESKTOP_SEARCH_DIRS: list[str] = [
+    d.strip()
+    for d in os.environ.get(
+        "FRIDAY_DESKTOP_SEARCH_DIRS",
+        str(Path.home()),
+    ).split(",")
+    if d.strip()
+]
+
+
+def desktop_llm_config() -> dict:
+    """Return LLM config for the desktop subagent (separate from main LLM)."""
+    cfg = _LLM_CONFIGS.get(DESKTOP_LLM_PROVIDER)
+    if cfg is None:
+        raise ValueError(
+            f"Unknown FRIDAY_DESKTOP_LLM provider: {DESKTOP_LLM_PROVIDER!r}. "
+            f"Choose: {list(_LLM_CONFIGS)}"
+        )
+    return {
+        "model": cfg["model"],
+        "base_url": cfg["base_url"],
+        "api_key": cfg["api_key"](),
+    }
+
 
 def llm_config() -> dict:
     """Return the active LLM config dict: {model, base_url, api_key}."""
