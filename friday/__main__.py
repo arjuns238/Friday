@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime
 
 from friday import config
 
@@ -30,7 +31,7 @@ def main() -> None:
         if cmd == "test-pipeline":
             import asyncio
             import threading
-            from datetime import date
+            pass
             from friday.graph import build_graph
             from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -45,7 +46,7 @@ def main() -> None:
                         {"done": False},
                         config={
                             "configurable": {
-                                "thread_id": date.today().isoformat(),
+                                "thread_id": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                                 "stop_event": stop,
                                 "mute_event": mute,
                                 "on_state_change": lambda s: print(f"  state: {s}"),

@@ -105,6 +105,85 @@ _SUBAGENT_TOOLS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "filesystem_search",
+            "description": (
+                "Search for files by name pattern using a raw filesystem walk — "
+                "no Spotlight index needed. Finds files in excluded folders, external drives, "
+                "hidden files, and recently created files that Spotlight misses. "
+                "Uses fd if installed, falls back to find. Returns up to 50 file paths."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Filename pattern to search for, e.g. 'resume' or '*.pdf'",
+                    },
+                    "search_dir": {
+                        "type": "string",
+                        "description": "Directory to search in (defaults to ~). Use ~/Downloads, ~/Desktop, etc.",
+                    },
+                    "include_hidden": {
+                        "type": "boolean",
+                        "description": "If true, also search hidden files and directories (starting with .)",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "content_search",
+            "description": (
+                "Search inside file contents for a text pattern. "
+                "Uses ripgrep (rg) if installed, falls back to grep -r. "
+                "Returns up to 30 file paths that contain the pattern."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Text pattern to search for inside files (case-insensitive).",
+                    },
+                    "search_dir": {
+                        "type": "string",
+                        "description": "Directory to search in (defaults to ~).",
+                    },
+                    "file_glob": {
+                        "type": "string",
+                        "description": "Optional glob to restrict file types, e.g. '*.py' or '*.md'",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recent_files",
+            "description": (
+                "Find recently used or modified files. Combines Spotlight recency index "
+                "with currently open Finder windows. Best for 'file I was just working on' queries."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hours_back": {
+                        "type": "integer",
+                        "description": "How many hours back to look (default 24).",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 # ── Tool implementations ──────────────────────────────────────────────────────
@@ -142,7 +221,7 @@ async def spotlight_search(
 
     if predicates:
         full_query = " && ".join(predicates)
-        if query and not any(query.startswith("kMDItem") for _ in [1]):
+        if query and not query.startswith("kMDItem"):
             # Combine free-text with predicates
             full_query = f'({full_query}) && ({query})'
         cmd.append(full_query)
@@ -297,6 +376,203 @@ def open_file(path: str, reveal: bool = False) -> str:
         return "open command timed out"
 
 
+async def filesystem_search(
+    pattern: str,
+    search_dir: str = "~",
+    include_hidden: bool = False,
+) -> str:
+    """Raw filesystem walk — no Spotlight index dependency. Uses fd if available, else find."""
+    loop = asyncio.get_running_loop()
+
+    # Strip leading/trailing wildcards — find -iname always wraps in *...*
+    clean_pattern = pattern.strip("*")
+
+    _PRUNE_DIRS = [
+        "Library", "node_modules", ".venv", "venv", "__pycache__",
+        ".git", ".Trash", "Caches", "Logs",
+    ]
+
+    # When searching home, try common dirs first — much faster than walking all of ~
+    requested_dir = os.path.expanduser(search_dir)
+    home = os.path.expanduser("~")
+    if requested_dir == home:
+        search_dirs = [
+            os.path.join(home, "Desktop"),
+            os.path.join(home, "Documents"),
+            os.path.join(home, "Downloads"),
+            home,  # full scan only if not found above
+        ]
+    else:
+        search_dirs = [requested_dir]
+
+    async def _search_one(directory: str) -> list[str]:
+        # Try fd first (fast, case-insensitive, stops at --max-results)
+        try:
+            fd_cmd = ["fd", "--type", "f", "--ignore-case", "--max-results", "50"]
+            if include_hidden:
+                fd_cmd.append("--hidden")
+            fd_cmd.extend([clean_pattern, directory])
+            log.info("filesystem_search (fd): %s", " ".join(fd_cmd))
+            proc = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(fd_cmd, capture_output=True, text=True, timeout=8),
+            )
+            if proc.returncode == 0:
+                return [p for p in proc.stdout.strip().split("\n") if p]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Fallback: find with directory pruning
+        prune_expr: list[str] = []
+        for d in _PRUNE_DIRS:
+            prune_expr += ["-name", d, "-prune", "-o"]
+        find_cmd = ["find", directory] + prune_expr
+        if not include_hidden:
+            find_cmd += ["(", "-not", "-path", "*/.*", ")"]
+        find_cmd += ["-type", "f", "-iname", f"*{clean_pattern}*", "-print"]
+        log.info("filesystem_search (find): %s", " ".join(find_cmd))
+        try:
+            proc = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(find_cmd, capture_output=True, text=True, timeout=8),
+            )
+            return [p for p in proc.stdout.strip().split("\n") if p]
+        except subprocess.TimeoutExpired:
+            log.warning("filesystem_search timed out in %s", directory)
+            return []
+
+    all_paths: list[str] = []
+    seen: set[str] = set()
+    for d in search_dirs:
+        if not os.path.isdir(d):
+            continue
+        results = await _search_one(d)
+        for p in results:
+            if p not in seen:
+                seen.add(p)
+                all_paths.append(p)
+        if all_paths and d != home:
+            # Found something in a common dir — no need for full home scan
+            break
+
+    all_paths = all_paths[:50]
+    if not all_paths:
+        return "No files found."
+    return "\n".join(all_paths)
+
+
+async def content_search(
+    pattern: str,
+    search_dir: str = "~",
+    file_glob: Optional[str] = None,
+) -> str:
+    """Search inside file contents. Uses rg if available, else grep -r."""
+    directory = os.path.expanduser(search_dir)
+    loop = asyncio.get_running_loop()
+
+    # Try ripgrep first
+    try:
+        rg_cmd = ["rg", "-l", "-i"]
+        if file_glob:
+            rg_cmd.extend(["--iglob", file_glob])
+        rg_cmd.extend([pattern, directory])
+        log.info("content_search (rg): %s", " ".join(rg_cmd))
+        proc = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(rg_cmd, capture_output=True, text=True, timeout=30),
+        )
+        if proc.returncode in (0, 1):  # 1 = no matches (not an error)
+            paths = [p for p in proc.stdout.strip().split("\n") if p]
+            paths = paths[:30]
+            if paths:
+                return "\n".join(paths)
+            return "No files found."
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # rg not installed — fall through to grep
+
+    # Fallback: grep -r
+    grep_cmd = ["grep", "-r", "-l", "-i"]
+    if file_glob:
+        grep_cmd.extend(["--include", file_glob])
+    grep_cmd.extend([pattern, directory])
+    log.info("content_search (grep): %s", " ".join(grep_cmd))
+
+    try:
+        proc = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(grep_cmd, capture_output=True, text=True, timeout=30),
+        )
+    except subprocess.TimeoutExpired:
+        return "Content search timed out after 30 seconds."
+
+    paths = [p for p in proc.stdout.strip().split("\n") if p]
+    paths = paths[:30]
+    if not paths:
+        return "No files found."
+    return "\n".join(paths)
+
+
+async def recent_files(hours_back: int = 24) -> str:
+    """Combine Spotlight recency + open Finder windows to find recently used files."""
+    loop = asyncio.get_running_loop()
+    found: list[str] = []
+
+    # 1. mdfind: files used in the last N hours
+    days = max(1, hours_back // 24)
+    mdfind_cmd = ["mdfind", "-onlyin", os.path.expanduser("~"),
+                  f"kMDItemLastUsedDate >= $time.today(-{days})"]
+    log.info("recent_files mdfind: %s", " ".join(mdfind_cmd))
+    try:
+        proc = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(mdfind_cmd, capture_output=True, text=True, timeout=10),
+        )
+        if proc.returncode == 0:
+            found.extend(p for p in proc.stdout.strip().split("\n") if p)
+    except subprocess.TimeoutExpired:
+        log.warning("recent_files mdfind timed out")
+
+    # 2. osascript: path of front Finder window (if open)
+    osa_script = (
+        'tell application "Finder"\n'
+        '  if (count of windows) > 0 then\n'
+        '    get POSIX path of (target of front window as alias)\n'
+        '  end if\n'
+        'end tell'
+    )
+    try:
+        proc = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["osascript", "-e", osa_script],
+                capture_output=True, text=True, timeout=5,
+            ),
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            finder_dir = proc.stdout.strip()
+            # List files in the Finder window directory
+            for entry in os.scandir(finder_dir):
+                if entry.is_file():
+                    found.append(entry.path)
+    except (subprocess.TimeoutExpired, PermissionError, OSError):
+        pass  # Finder not open or inaccessible
+
+    # Deduplicate, sort by mtime (most recent first), cap at 50
+    seen: set[str] = set()
+    unique: list[str] = []
+    for p in found:
+        if p not in seen and os.path.exists(p):
+            seen.add(p)
+            unique.append(p)
+
+    unique.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    unique = unique[:50]
+
+    if not unique:
+        return "No recently used files found."
+    return "\n".join(unique)
+
+
 # ── Query pre-processing ─────────────────────────────────────────────────────
 
 _CONTENT_TYPE_MAP = {
@@ -386,23 +662,32 @@ class DesktopAgent:
     until it has enough information to answer the user's question.
     """
 
-    MAX_ITERATIONS = 5
+    MAX_ITERATIONS = 8
 
     SYSTEM_PROMPT = """You are a desktop intelligence agent with access to macOS data sources.
 Your job is to answer questions about the user's files, photos, and local data by searching and reasoning over metadata.
 
 Available tools:
 - spotlight_search: Search files via macOS Spotlight (fast, indexed). Supports content type filters, date ranges, name patterns.
+- filesystem_search: Raw filesystem walk — no index needed. Finds files Spotlight misses (excluded folders, external drives, hidden files, recent files).
+- content_search: Search inside file contents using ripgrep or grep. Returns files that contain the pattern.
+- recent_files: Find recently used/modified files. Combines Spotlight recency with open Finder windows.
 - file_metadata: Get rich metadata for files (GPS, dates, size, authors, download source, etc.)
 - open_file: Open a file with its default app or reveal in Finder.
 
 Strategy:
-1. Break the query into what data you need
-2. Start with spotlight_search to find relevant files
-3. Use file_metadata to extract details (GPS, dates, etc.) if needed
-4. Synthesize a natural spoken answer (2-3 sentences max)
+1. For "find file named X": if the folder is not obvious from the request, ask the user which folder it might be in before searching — e.g. "Do you know which folder it's in? Desktop, Documents, Downloads?"
+2. If the user knows the folder, pass it as search_dir to spotlight_search or filesystem_search to avoid slow full-home scans.
+3. If the folder is unknown, try spotlight_search first; if 0 results, use filesystem_search (no index needed).
+4. For "file about X" / content queries: use content_search.
+5. For "file I was just working on" / "recently opened": use recent_files.
+6. Use file_metadata after finding paths to get dates, GPS, size.
+7. Use open_file only when explicitly asked to open/reveal.
+8. When you find a file, always include its full absolute path in your answer so it can be opened later.
+   e.g. "Found your resume at /Users/asri/Desktop/Arjun_Sriram.pdf"
+9. Synthesize a concise spoken answer (2-3 sentences).
 
-Be efficient — you have a maximum of 5 tool calls. Give concise, spoken answers."""
+Be efficient — you have a maximum of 8 tool calls. Give concise, spoken answers."""
 
     def __init__(self) -> None:
         self._client: Any = None
@@ -485,6 +770,12 @@ Be efficient — you have a maximum of 5 tool calls. Give concise, spoken answer
         try:
             if name == "spotlight_search":
                 return await spotlight_search(**args)
+            elif name == "filesystem_search":
+                return await filesystem_search(**args)
+            elif name == "content_search":
+                return await content_search(**args)
+            elif name == "recent_files":
+                return await recent_files(**args)
             elif name == "file_metadata":
                 return await file_metadata(**args)
             elif name == "open_file":

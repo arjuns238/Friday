@@ -149,9 +149,14 @@ async def build_node(state: FridayState, config: RunnableConfig) -> dict:
                 except asyncio.CancelledError:
                     pass
             await loop.run_in_executor(None, lambda: barge_done_event.wait(timeout=30))
-            log.info("Barge-in during build — restarting with new audio")
+            # Concatenate original audio + barge audio so the full utterance
+            # (including the part spoken before the pause) gets re-transcribed.
+            barge = barge_audio_ref[0] or b""
+            combined = (audio or b"") + barge
+            log.info("Barge-in during build — restarting with combined audio (%d+%d=%d bytes)",
+                     len(audio or b""), len(barge), len(combined))
             return {
-                "audio": barge_audio_ref[0],  # queued: listen_node will passthrough
+                "audio": combined,  # queued: listen_node will passthrough
                 "response_text": "",
                 "transcript": "",
             }
