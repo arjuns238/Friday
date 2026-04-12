@@ -40,7 +40,7 @@ VAD_SPEECH_THRESHOLD: int = int(os.environ.get("FRIDAY_VAD_THRESHOLD", "400"))
 # Consecutive speech frames required to confirm onset (~150ms at 30ms/frame)
 VAD_ONSET_FRAMES: int = int(os.environ.get("FRIDAY_VAD_ONSET_FRAMES", "5"))
 # Consecutive silence frames required to end segment (~300ms)
-VAD_OFFSET_FRAMES: int = int(os.environ.get("FRIDAY_VAD_OFFSET_FRAMES", "15"))
+VAD_OFFSET_FRAMES: int = int(os.environ.get("FRIDAY_VAD_OFFSET_FRAMES", "25"))
 # Frames kept before speech onset (pre-roll, ~300ms)
 VAD_PRE_ROLL_FRAMES: int = 10
 
@@ -81,6 +81,14 @@ def llm_config() -> dict:
         "base_url": cfg["base_url"],
         "api_key":  cfg["api_key"](),
     }
+
+# ── Claude Code Agent ─────────────────────────────────────────────────────────
+# Default project directory when the LLM can't infer it from context
+CLAUDE_DEFAULT_PROJECT_DIR: str = os.environ.get(
+    "CLAUDE_DEFAULT_PROJECT_DIR", str(Path.home())
+)
+# Permission mode: "default" | "acceptEdits" | "plan" | "bypassPermissions"
+CLAUDE_PERMISSION_MODE: str = os.environ.get("CLAUDE_PERMISSION_MODE", "acceptEdits")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 FRIDAY_DIR: Path = Path.home() / ".friday"
