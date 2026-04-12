@@ -106,7 +106,7 @@ async def listen_node(state: FridayState, config: RunnableConfig) -> dict:
 # ── Node: build ────────────────────────────────────────────────────────────────
 
 async def build_node(state: FridayState, config: RunnableConfig) -> dict:
-    """Screenshot + transcribe + LLM plan + tool dispatch.
+    """Transcribe + LLM plan + (optional screenshot) + tool dispatch.
 
     Runs a barge-in detector in parallel. If the user speaks during processing,
     build is cancelled and their new audio is queued for the next cycle.
@@ -177,17 +177,18 @@ async def build_node(state: FridayState, config: RunnableConfig) -> dict:
 
 
 async def _do_build(audio: bytes, history: list[BaseMessage], speak_fn) -> dict:
-    """Inner build (no barge detection): transcribe → plan → dispatch."""
+    """Inner build (no barge detection): transcribe → plan → dispatch.
+
+    Two-pass flow: transcribe first (no screenshot), then if the LLM calls
+    take_screenshot, capture the screen and re-plan with visual context.
+    """
     t0 = time.monotonic()
     from friday.capture.screenshot import capture_focused_display
     from friday.orchestrate.llm import plan_tool_call
     from friday.tools.base import dispatch_tool
     from friday.transcribe.deepgram import transcribe
 
-    screenshot_b64, transcript = await asyncio.gather(
-        asyncio.get_running_loop().run_in_executor(None, capture_focused_display),
-        transcribe(audio),
-    )
+    transcript = await transcribe(audio)
 
     log.info("Transcript (%.0fms): %r", (time.monotonic() - t0) * 1000, transcript)
 
@@ -196,10 +197,23 @@ async def _do_build(audio: bytes, history: list[BaseMessage], speak_fn) -> dict:
         return {"response_text": "", "transcript": "", "audio": None}
 
     history_dicts = _messages_to_dicts(history[-12:])
+
+    # First pass: text-only routing (no screenshot)
     tool_name, arguments, thinking = await plan_tool_call(
-        transcript, screenshot_b64, history=history_dicts
+        transcript, screenshot_b64=None, history=history_dicts
     )
-    log.info("Plan (%.0fms): tool=%s", (time.monotonic() - t0) * 1000, tool_name)
+    log.info("Plan pass 1 (%.0fms): tool=%s", (time.monotonic() - t0) * 1000, tool_name)
+
+    # If the LLM wants to see the screen, capture and re-route
+    if tool_name == "take_screenshot":
+        if thinking:
+            await speak_fn(thinking)
+        loop = asyncio.get_running_loop()
+        screenshot_b64 = await loop.run_in_executor(None, capture_focused_display)
+        tool_name, arguments, thinking = await plan_tool_call(
+            transcript, screenshot_b64=screenshot_b64, history=history_dicts
+        )
+        log.info("Plan pass 2 (%.0fms): tool=%s", (time.monotonic() - t0) * 1000, tool_name)
 
     if thinking:
         tool_result, _ = await asyncio.gather(
@@ -356,10 +370,6 @@ def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict]:
 async def _build_spoken_response(transcript: str, tool_name: str, result: str) -> str:
     if tool_name == "speak_answer":
         return result
-    if tool_name == "inject_claude_code":
-        if "failed" in result.lower():
-            return f"I couldn't inject into Claude Code. {result}"
-        return "Done, I've sent that to Claude Code."
     if tool_name == "draft_gmail":
         return result
     if tool_name == "web_search":

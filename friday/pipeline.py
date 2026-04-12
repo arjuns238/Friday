@@ -225,10 +225,6 @@ class Pipeline:
 async def _build_spoken_response(transcript: str, tool_name: str, result: str) -> str:
     if tool_name == "speak_answer":
         return result
-    elif tool_name == "inject_claude_code":
-        if "failed" in result.lower():
-            return f"I couldn't inject into Claude Code. {result}"
-        return "Done, I've sent that to Claude Code."
     elif tool_name == "draft_gmail":
         return result
     elif tool_name == "web_search":

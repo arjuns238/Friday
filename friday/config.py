@@ -26,7 +26,7 @@ MUTE_KEY: str = os.environ.get("FRIDAY_MUTE_KEY", "ctrl+shift+g")
 # ── Voice / TTS ───────────────────────────────────────────────────────────────
 # ElevenLabs voice ID — default: "Rachel" (21m00Tcm4TlvDq8ikWAM)
 ELEVENLABS_VOICE_ID: str = os.environ.get(
-    "FRIDAY_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"  # Bella (premade, free tier)
+    "FRIDAY_VOICE_ID", "Xb7hH8MSUJpSbSDYk0k2"  # Alice — Clear, Engaging Educator
 )
 
 # ── Audio ─────────────────────────────────────────────────────────────────────

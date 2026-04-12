@@ -155,7 +155,7 @@ def _play_via_afplay(mp3_bytes: bytes) -> None:
 
 async def _say_fallback(text: str) -> None:
     proc = await asyncio.create_subprocess_exec(
-        "say", text[:200],
+        "say", "-v", "Samantha", text[:200],
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )

@@ -27,17 +27,6 @@ def main() -> None:
             setup_gmail_auth()
             return
 
-        if cmd == "start-claude":
-            from friday.tools.claude_code import start_claude_via_pipe
-            print("Starting Claude Code via named pipe...")
-            proc = start_claude_via_pipe()
-            print(f"Claude Code running (pid={proc.pid}). Press Ctrl+C to stop.")
-            try:
-                proc.wait()
-            except KeyboardInterrupt:
-                proc.terminate()
-            return
-
         if cmd == "test-pipeline":
             import asyncio
             import threading
@@ -48,8 +37,8 @@ def main() -> None:
             async def _test():
                 stop = threading.Event()
                 mute = threading.Event()
-                asyncio.get_event_loop().call_later(30, stop.set)
-                print("  Speak now... (auto-stops after 30s or press Ctrl+C)")
+                asyncio.get_event_loop().call_later(120, stop.set)
+                print("  Speak now... (auto-stops after 120s or press Ctrl+C)")
                 async with AsyncSqliteSaver.from_conn_string(str(config.DB_PATH)) as checkpointer:
                     graph = build_graph(checkpointer)
                     await graph.ainvoke(
@@ -87,7 +76,6 @@ Friday — voice-first AI orchestrator
 Usage:
   friday                 Start the menu bar app
   friday setup-gmail     Authenticate with Gmail (one-time OAuth2 setup)
-  friday start-claude    Start Claude Code connected to Friday via named pipe
   friday test-pipeline   Run one invocation cycle (no menu bar)
   friday help            Show this message
 """
