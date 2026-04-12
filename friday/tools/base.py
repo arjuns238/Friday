@@ -74,14 +74,6 @@ TOOL_DEFINITIONS: list[dict] = [
                 "opening files, photo location queries, download history, etc. "
                 "Examples: 'find my resume', 'screenshots from yesterday', "
                 "'what did I download last week', 'pictures of the beach'."
-            "name": "take_screenshot",
-            "description": (
-                "Capture a screenshot of what the user is currently looking at. "
-                "Use this FIRST when the user references something visual on their screen — "
-                "e.g. 'look at this', 'what's on my screen', 'this code', 'this email', "
-                "'read this', 'what do you see', 'check this out'. "
-                "After calling this tool, you will receive the screenshot and be asked to "
-                "decide which action to take based on what you see."
             ),
             "parameters": {
                 "type": "object",
@@ -96,6 +88,34 @@ TOOL_DEFINITIONS: list[dict] = [
                     },
                 },
                 "required": ["thinking", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "take_screenshot",
+            "description": (
+                "Capture a screenshot of what the user is currently looking at. "
+                "Use this FIRST when the user references something visual on their screen — "
+                "e.g. 'look at this', 'what's on my screen', 'this code', 'this email', "
+                "'read this', 'what do you see', 'check this out'. "
+                "After calling this tool, you will receive the screenshot and be asked to "
+                "decide which action to take based on what you see."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thinking": {
+                        "type": "string",
+                        "description": (
+                            "Natural, brief phrase to say aloud while capturing. "
+                            "e.g. 'Let me take a look', 'Checking your screen'. "
+                            "Keep under 8 words."
+                        ),
+                    },
+                },
+                "required": ["thinking"],
             },
         },
     },
@@ -124,15 +144,9 @@ TOOL_DEFINITIONS: list[dict] = [
                     },
                 },
                 "required": ["thinking", "path"],
-                        "description": (
-                            "Natural, brief phrase to say aloud while capturing. "
-                            "e.g. 'Let me take a look', 'Checking your screen'. "
-                            "Keep under 8 words."
-                        ),
-                    },
-                },
-                "required": ["thinking"],
+            },
         },
+    },
     {
         "type": "function",
         "function": {
@@ -185,7 +199,7 @@ async def dispatch_tool(name: str, arguments: dict[str, Any]) -> str:
         import asyncio
         loop = asyncio.get_running_loop()
         screenshot_b64 = await loop.run_in_executor(None, capture_focused_display)
-        return screenshot_b64
+        return screenshot_b64 or ""
 
     elif name == "speak_answer":
         return arguments["answer"]
