@@ -148,3 +148,12 @@ def save_to_memory(fact: str) -> str:
         f.write(f"- {fact}\n")
     log.info("Saved to memory: %s", fact[:80])
     return f"Saved: {fact}"
+
+
+def save_to_profile(fact: str) -> str:
+    """Append a fact to USER.md. Returns confirmation string."""
+    ensure_defaults()
+    with config.USER_PATH.open("a", encoding="utf-8") as f:
+        f.write(f"- {fact}\n")
+    log.info("Saved to profile: %s", fact[:80])
+    return f"Saved to profile: {fact}"

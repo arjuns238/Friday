@@ -154,7 +154,9 @@ TOOL_DEFINITIONS: list[dict] = [
             "description": (
                 "Save an important fact or preference to long-term memory. "
                 "Use when the user says 'remember that', 'keep in mind', 'don't forget', "
-                "or states a strong preference you should retain across sessions."
+                "or states a strong preference you should retain across sessions. "
+                "Also use when the user shares personal info like their name, role, "
+                "preferred tools, tech stack, or communication style."
             ),
             "parameters": {
                 "type": "object",
@@ -167,8 +169,17 @@ TOOL_DEFINITIONS: list[dict] = [
                         "type": "string",
                         "description": "The fact or preference to remember, written clearly and concisely.",
                     },
+                    "category": {
+                        "type": "string",
+                        "enum": ["profile", "memory"],
+                        "description": (
+                            "Where to store this. Use 'profile' for personal identity and "
+                            "preferences (name, role, tools, tech stack, workflow habits). "
+                            "Use 'memory' for everything else (project facts, one-off reminders, events)."
+                        ),
+                    },
                 },
-                "required": ["thinking", "fact"],
+                "required": ["thinking", "fact", "category"],
             },
         },
     },
@@ -252,7 +263,9 @@ async def dispatch_tool(name: str, arguments: dict[str, Any]) -> str:
         return screenshot_b64 or ""
 
     elif name == "save_memory":
-        from friday.memory.context import save_to_memory
+        from friday.memory.context import save_to_memory, save_to_profile
+        if arguments.get("category") == "profile":
+            return save_to_profile(arguments["fact"])
         return save_to_memory(arguments["fact"])
 
     elif name == "memory_search":
