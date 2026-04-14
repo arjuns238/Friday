@@ -175,6 +175,7 @@ def _tap_callback(buffer, when):
 # Engine singleton — started once, never stopped (maintains AEC echo model)
 # ---------------------------------------------------------------------------
 
+
 def _get_engine():
     global _engine, _decimate
 
@@ -254,6 +255,7 @@ def _listen_sync_aec(
     speech_frames = 0
     silence_frames = 0
     in_speech = False
+    was_muted = mute_event.is_set()
     max_frames = (config.MAX_RECORDING_SECONDS * 1000) // _FRAME_MS
     idle_log_counter = 0
 
@@ -266,7 +268,19 @@ def _listen_sync_aec(
                 log.info("AEC listen: queue empty — tap_calls=%d", _tap_call_count)
             continue
 
-        frame = _SILENCE_FRAME if mute_event.is_set() else _to_int16_bytes(raw)
+        is_muted = mute_event.is_set()
+
+        # On unmute transition: drain stale frames so VAD gets fresh audio
+        if was_muted and not is_muted:
+            log.info("AEC listen: unmuted — draining stale frames")
+            _drain_queue()
+            speech_frames = 0
+            pre_roll.clear()
+            was_muted = False
+            continue  # skip this stale frame, get a fresh one
+        was_muted = is_muted
+
+        frame = _SILENCE_FRAME if is_muted else _to_int16_bytes(raw)
         rms = _rms(frame)
         is_speech = rms > config.VAD_SPEECH_THRESHOLD
 
@@ -320,6 +334,7 @@ def _barge_in_sync_aec(
     speech_frames = 0
     silence_frames = 0
     in_speech = False
+    was_muted = mute_event.is_set()
     max_frames = (config.MAX_RECORDING_SECONDS * 1000) // _FRAME_MS
 
     while not stop_event.is_set():
@@ -331,7 +346,17 @@ def _barge_in_sync_aec(
         except queue.Empty:
             continue
 
-        frame = _SILENCE_FRAME if mute_event.is_set() else _to_int16_bytes(raw)
+        is_muted = mute_event.is_set()
+        if was_muted and not is_muted:
+            log.info("AEC barge-in: unmuted — draining stale frames")
+            _drain_queue()
+            speech_frames = 0
+            pre_roll.clear()
+            was_muted = False
+            continue
+        was_muted = is_muted
+
+        frame = _SILENCE_FRAME if is_muted else _to_int16_bytes(raw)
         rms = _rms(frame)
         is_speech = rms > config.VAD_SPEECH_THRESHOLD
 
