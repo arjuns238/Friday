@@ -57,9 +57,8 @@ async def speak_interruptible(
     try:
         mp3_bytes = await loop.run_in_executor(None, lambda: _get_tts_audio(text))
     except Exception as exc:
-        log.error("TTS download failed: %s", exc)
-        await _say_fallback(text)
-        return None
+        log.error("TTS download failed: %s — falling back to say", exc)
+        return await _say_fallback_interruptible(text, stop_event, mute_event)
 
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
         f.write(mp3_bytes)
@@ -153,9 +152,64 @@ def _play_via_afplay(mp3_bytes: bytes) -> None:
             pass
 
 
+async def _say_fallback_interruptible(
+    text: str,
+    stop_event: threading.Event,
+    mute_event: threading.Event,
+) -> Optional[bytes]:
+    """macOS say with barge-in support. Same pattern as speak_interruptible."""
+    from friday.capture.audio import _barge_in_sync
+
+    log.warning("Using macOS say fallback for TTS (with barge-in)")
+
+    onset_event = threading.Event()
+    cancel_event = threading.Event()
+    barge_result: list[Optional[bytes]] = [None]
+
+    def _run_barge():
+        barge_result[0] = _barge_in_sync(stop_event, mute_event, onset_event, cancel_event)
+
+    barge_thread = threading.Thread(target=_run_barge, daemon=True)
+    barge_thread.start()
+
+    loop = asyncio.get_event_loop()
+    interrupted = False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "say", "-v", "Samantha", text,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        while not stop_event.is_set():
+            if onset_event.is_set():
+                proc.kill()
+                await proc.wait()
+                interrupted = True
+                break
+            try:
+                await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=0.03)
+                break
+            except asyncio.TimeoutError:
+                continue
+
+        if stop_event.is_set() and not interrupted:
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+    finally:
+        if not interrupted:
+            cancel_event.set()
+        await loop.run_in_executor(None, lambda: barge_thread.join(timeout=0.2))
+
+    return barge_result[0] if interrupted else None
+
+
 async def _say_fallback(text: str) -> None:
+    """Non-interruptible fallback (used by speak())."""
     proc = await asyncio.create_subprocess_exec(
-        "say", "-v", "Samantha", text[:200],
+        "say", "-v", "Samantha", text,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
