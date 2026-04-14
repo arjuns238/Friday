@@ -27,6 +27,9 @@ from langgraph.types import RunnableConfig
 
 log = logging.getLogger(__name__)
 
+# Track flushed message IDs to avoid re-flushing on consecutive builds
+_flushed_msg_ids: set[str] = set()
+
 _RESUME_RE = re.compile(
     r"\b(go on|continue|keep going|keep talking|go ahead|resume|"
     r"carry on|please continue|finish|what else|what were you saying|"
@@ -201,11 +204,20 @@ async def _do_build(audio: bytes, history: list[BaseMessage], speak_fn) -> dict:
         log.warning("Empty transcript, skipping")
         return {"response_text": "", "transcript": "", "audio": None}
 
+    # Pre-compaction flush: if messages are about to be dropped, summarize them
+    if len(history) > 12:
+        dropped = history[:-12]
+        asyncio.create_task(_flush_dropped_context(dropped))
+
     history_dicts = _messages_to_dicts(history[-12:])
+
+    # Load memory context for system prompt injection
+    from friday.memory.context import load_memory_context
+    memory_context = load_memory_context()
 
     # First pass: text-only routing (no screenshot)
     tool_name, arguments, thinking = await plan_tool_call(
-        transcript, screenshot_b64=None, history=history_dicts
+        transcript, screenshot_b64=None, history=history_dicts, memory_context=memory_context
     )
     log.info("Plan pass 1 (%.0fms): tool=%s", (time.monotonic() - t0) * 1000, tool_name)
 
@@ -216,7 +228,7 @@ async def _do_build(audio: bytes, history: list[BaseMessage], speak_fn) -> dict:
         loop = asyncio.get_running_loop()
         screenshot_b64 = await loop.run_in_executor(None, capture_focused_display)
         tool_name, arguments, thinking = await plan_tool_call(
-            transcript, screenshot_b64=screenshot_b64, history=history_dicts
+            transcript, screenshot_b64=screenshot_b64, history=history_dicts, memory_context=memory_context
         )
         log.info("Plan pass 2 (%.0fms): tool=%s", (time.monotonic() - t0) * 1000, tool_name)
 
@@ -263,6 +275,15 @@ async def speak_node(state: FridayState, config: RunnableConfig) -> dict:
     if transcript:
         new_msgs.append(HumanMessage(content=transcript))
     new_msgs.append(AIMessage(content=response_text))
+
+    # Fire-and-forget: log to daily note
+    try:
+        from friday.memory.context import append_daily_note
+        tool = state.get("tool_name", "")
+        summary = f"Q: {transcript[:80]} → [{tool}] A: {response_text[:80]}"
+        append_daily_note(summary)
+    except Exception:
+        log.debug("Daily note append failed", exc_info=True)
 
     return {
         "barge_audio": interruption,
@@ -361,6 +382,62 @@ def build_graph(checkpointer=None):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+async def _flush_dropped_context(dropped: list[BaseMessage]) -> None:
+    """Summarize dropped messages and append to today's daily note. Fire-and-forget."""
+    try:
+        # Deduplicate: only flush messages we haven't seen before
+        new_msgs = []
+        for msg in dropped:
+            msg_id = id(msg)
+            if msg_id not in _flushed_msg_ids:
+                _flushed_msg_ids.add(msg_id)
+                new_msgs.append(msg)
+
+        if not new_msgs:
+            return
+
+        from friday.memory.context import append_daily_note
+        from friday.orchestrate.llm import synthesize_response
+
+        # Build a compact summary prompt
+        lines = []
+        for msg in new_msgs:
+            content = str(msg.content)[:100]
+            role = "User" if isinstance(msg, HumanMessage) else "Friday"
+            lines.append(f"{role}: {content}")
+
+        conversation_text = "\n".join(lines)
+
+        from openai import AsyncOpenAI
+        from friday import config
+
+        cfg = config.llm_config()
+        client = AsyncOpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
+
+        response = await client.chat.completions.create(
+            model=cfg["model"],
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Summarize these conversation turns in 1-2 sentences. "
+                        "Focus on decisions, facts learned, and action items. Be concise."
+                    ),
+                },
+                {"role": "user", "content": conversation_text},
+            ],
+            max_tokens=128,
+        )
+
+        summary = response.choices[0].message.content or ""
+        if summary.strip():
+            append_daily_note(f"[context flush] {summary.strip()}")
+            log.info("Flushed %d dropped messages to daily note", len(new_msgs))
+
+    except Exception:
+        log.debug("Context flush failed", exc_info=True)
+
+
 def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict]:
     """Convert LangChain messages to OpenAI-format dicts for LLM context injection."""
     result = []
@@ -386,4 +463,9 @@ async def _build_spoken_response(transcript: str, tool_name: str, result: str) -
         if "not found" in result.lower() or "failed" in result.lower():
             return f"I couldn't open that. {result}"
         return result
+    if tool_name == "save_memory":
+        return "Got it, I'll remember that."
+    if tool_name == "memory_search":
+        from friday.orchestrate.llm import synthesize_response
+        return await synthesize_response(transcript, result)
     return result
