@@ -18,7 +18,7 @@ from friday import config
 
 log = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """You are Friday, a voice-first AI assistant running on the user's Mac.
+_ROUTING_RULES = """\
 You receive a voice transcript of what the user said. You may also receive a screenshot if one was captured.
 
 Your job: decide which tool to call based on what you hear (and see, if a screenshot is present).
@@ -30,12 +30,12 @@ Decision rules:
   Examples: "find", "where is", "show me", "look for", "open [vague]", "where did I go",
   "what did I download", "pictures of", "that PDF about", "screenshots from", "my resume"
 - For "open the first one" / "open the second one" after a desktop_query → open_file with the path from conversation history
+- If the user says "remember this", "keep in mind", "don't forget", or states a strong preference → save_memory
+- If the user asks "do you remember", "what did we talk about", "when did I" → memory_search
 - Use web_search when you feel you need to look something up or when you don't have the necessary information to respond accurately (e.g. current events, recent releases, prices, unknown facts). If you can answer confidently from what's visible on screen or general knowledge, use speak_answer instead.
 - For everything else (factual questions, explanations, reasoning about visible content, opinions) → speak_answer
 - If the user references something on their screen ("look at this", "what's on my screen", "this code", "this email", "read this", "check this out") AND no screenshot is present → take_screenshot
 - If the user says "email", "write to", "reply to", "message" → draft_gmail
-- Use web_search when you need to look something up or lack necessary info (current events, recent releases, prices, unknown facts). If you can answer confidently from general knowledge, use speak_answer instead.
-- For everything else (factual questions, explanations, opinions) → speak_answer
 
 When a screenshot IS present:
 - Use visual context to inform your tool choice and arguments
@@ -51,10 +51,20 @@ For tools that have a `thinking` field, always fill it with a natural, brief phr
 Always call exactly one tool. Do not respond with plain text."""
 
 
+def _build_system_prompt(memory_context: str | None = None) -> str:
+    """Assemble system prompt from memory context + routing rules."""
+    parts = []
+    if memory_context:
+        parts.append(memory_context)
+    parts.append(_ROUTING_RULES)
+    return "\n\n".join(parts)
+
+
 async def plan_tool_call(
     transcript: str,
     screenshot_b64: Optional[str] = None,
     history: Optional[list[dict]] = None,
+    memory_context: Optional[str] = None,
 ) -> tuple[str, dict, Optional[str]]:
     """Call the LLM and return (tool_name, arguments, thinking) WITHOUT executing the tool.
 
@@ -81,7 +91,7 @@ async def plan_tool_call(
         })
     user_content.append({"type": "text", "text": f"User said: {transcript}"})
 
-    messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    messages: list[dict] = [{"role": "system", "content": _build_system_prompt(memory_context)}]
     if history:
         messages.extend(history)  # inject last N turns of conversation context
     messages.append({"role": "user", "content": user_content})

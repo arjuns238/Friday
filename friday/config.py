@@ -117,6 +117,14 @@ GOOGLE_CREDS_PATH: Path = FRIDAY_DIR / "google_creds.json"
 CLAUDE_PIPE_PATH: Path = FRIDAY_DIR / "claude_input.pipe"
 DB_PATH: Path = FRIDAY_DIR / "memory.db"   # conversation history (AsyncSqliteSaver)
 
+# ── Memory ───────────────────────────────────────────────────────────────────
+MEMORY_DIR: Path = FRIDAY_DIR / "memory"
+MEMORY_DIR.mkdir(exist_ok=True)
+SOUL_PATH: Path = FRIDAY_DIR / "SOUL.md"
+USER_PATH: Path = FRIDAY_DIR / "USER.md"
+MEMORY_PATH: Path = FRIDAY_DIR / "MEMORY.md"
+MEMORY_MAX_CHARS: int = int(os.environ.get("FRIDAY_MEMORY_MAX_CHARS", "8000"))
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = os.environ.get("FRIDAY_LOG_LEVEL", "INFO")
 

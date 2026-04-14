@@ -150,6 +150,56 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "save_memory",
+            "description": (
+                "Save an important fact or preference to long-term memory. "
+                "Use when the user says 'remember that', 'keep in mind', 'don't forget', "
+                "or states a strong preference you should retain across sessions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thinking": {
+                        "type": "string",
+                        "description": "Brief phrase to say aloud. e.g. 'Noted'. Keep under 8 words.",
+                    },
+                    "fact": {
+                        "type": "string",
+                        "description": "The fact or preference to remember, written clearly and concisely.",
+                    },
+                },
+                "required": ["thinking", "fact"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_search",
+            "description": (
+                "Search long-term memory and daily notes for past conversations and saved facts. "
+                "Use when the user asks 'do you remember', 'what did we talk about', "
+                "'when did I', or references something from a previous session."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thinking": {
+                        "type": "string",
+                        "description": "Brief phrase to say aloud. e.g. 'Let me check my notes'. Keep under 8 words.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Search query for memory lookup.",
+                    },
+                },
+                "required": ["thinking", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "speak_answer",
             "description": (
                 "Speak a direct answer to the user without invoking another tool. "
@@ -200,6 +250,17 @@ async def dispatch_tool(name: str, arguments: dict[str, Any]) -> str:
         loop = asyncio.get_running_loop()
         screenshot_b64 = await loop.run_in_executor(None, capture_focused_display)
         return screenshot_b64 or ""
+
+    elif name == "save_memory":
+        from friday.memory.context import save_to_memory
+        return save_to_memory(arguments["fact"])
+
+    elif name == "memory_search":
+        from friday.memory.search import search
+        results = search(arguments["query"])
+        if not results:
+            return "No matching memories found."
+        return "\n".join(f"[{r['source']}] {r['snippet']}" for r in results)
 
     elif name == "speak_answer":
         return arguments["answer"]
