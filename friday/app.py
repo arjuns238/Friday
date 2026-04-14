@@ -1,8 +1,8 @@
 """macOS menu bar app — the top-level entry point.
 
-Uses rumps for the menu bar and pynput for the global hotkey.
-Toggle mode: press hotkey to start/stop the always-on listening loop.
-Mute key: silences mic input without stopping the loop.
+Uses rumps for the menu bar and pynput for the mute hotkey.
+The always-on listening loop starts automatically on launch.
+Mute key (ctrl+m): silences mic input without stopping the loop.
 """
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import asyncio
 import logging
 import threading
 from datetime import datetime
-from typing import Optional
 
 import rumps
 
@@ -41,21 +40,14 @@ class FridayApp(rumps.App):
             title=_STATE_ICONS["idle"],
             quit_button="Quit Friday",
         )
-        self._running = False
-        self._stop_event: Optional[threading.Event] = None
+        self._stop_event = threading.Event()
         self._mute_event = threading.Event()   # set = muted
         self._muted = False
         self._pipeline_state = "idle"
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         self._loop_thread = threading.Thread(target=self._start_loop, daemon=True)
         self._loop_thread.start()
-
-        self._hotkey_listener = _build_hotkey_listener(
-            key_combo=config.HOTKEY,
-            on_trigger=self._on_hotkey_toggle,
-        )
-        self._hotkey_listener.start()
 
         self._mute_listener = _build_hotkey_listener(
             key_combo=config.MUTE_KEY,
@@ -63,11 +55,7 @@ class FridayApp(rumps.App):
         )
         self._mute_listener.start()
 
-        log.info(
-            "Friday started — %s to toggle listening, %s to toggle mute",
-            config.HOTKEY,
-            config.MUTE_KEY,
-        )
+        log.info("Friday started — %s to toggle mute", config.MUTE_KEY)
 
     @rumps.clicked("About Friday")
     def about(self, _):
@@ -75,7 +63,6 @@ class FridayApp(rumps.App):
             title="Friday",
             message=(
                 f"Voice-first AI orchestrator\n"
-                f"Press {config.HOTKEY} to start/stop listening\n"
                 f"Press {config.MUTE_KEY} to toggle mute\n"
                 f"Model: {config.LLM_PROVIDER}"
             ),
@@ -84,54 +71,52 @@ class FridayApp(rumps.App):
     def _start_loop(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        # Start the pipeline immediately
+        self._loop.call_soon(
+            lambda: asyncio.ensure_future(self._run_pipeline())
+        )
         self._loop.run_forever()
-
-    def _on_hotkey_toggle(self) -> None:
-        if self._running:
-            log.info("Stopping always-on loop")
-            if self._stop_event:
-                self._stop_event.set()
-        else:
-            log.info("Starting always-on loop")
-            self._running = True
-            self._stop_event = threading.Event()
-            asyncio.run_coroutine_threadsafe(
-                self._run_pipeline(self._stop_event), self._loop
-            )
 
     def _on_mute_toggle(self) -> None:
         if self._muted:
             self._mute_event.clear()
             self._muted = False
-            log.info("Mic unmuted")
+            log.info("Mic unmuted (state=%s)", self._pipeline_state)
         else:
             self._mute_event.set()
             self._muted = True
-            log.info("Mic muted")
+            log.info("Mic muted (state=%s)", self._pipeline_state)
         self._refresh_title()
 
-    async def _run_pipeline(self, stop_event: threading.Event) -> None:
-        pass
+    async def _run_pipeline(self) -> None:
         from friday.graph import build_graph
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
         try:
             async with AsyncSqliteSaver.from_conn_string(str(config.DB_PATH)) as checkpointer:
                 graph = build_graph(checkpointer)
-                await graph.ainvoke(
-                    {"done": False},
-                    config={
-                        "configurable": {
-                            "thread_id": _SESSION_ID,
-                            "stop_event": stop_event,
-                            "mute_event": self._mute_event,
-                            "on_state_change": self._on_state_change,
-                        }
+                invoke_cfg = {
+                    "configurable": {
+                        "thread_id": _SESSION_ID,
+                        "stop_event": self._stop_event,
+                        "mute_event": self._mute_event,
+                        "on_state_change": self._on_state_change,
                     },
-                )
-        finally:
-            self._running = False
-            self._stop_event = None
+                    "recursion_limit": 500,
+                }
+                # Re-invoke the graph if it exits unexpectedly
+                # (e.g. recursion limit hit, transient error).
+                while not self._stop_event.is_set():
+                    try:
+                        await graph.ainvoke({"done": False}, config=invoke_cfg)
+                    except Exception as exc:
+                        if self._stop_event.is_set():
+                            break
+                        log.error("Graph exited unexpectedly: %s — restarting", exc)
+                        continue
+                    break  # normal exit (stop_event or done=True)
+        except Exception as exc:
+            log.exception("Pipeline fatal error: %s", exc)
 
     def _on_state_change(self, state: str) -> None:
         self._pipeline_state = state
@@ -211,7 +196,7 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
                 else:
                     self._current_special.add(key)
 
-            if (modifier_keys.issubset(self._current_mods)
+            if (modifier_keys == self._current_mods
                     and char_vks.issubset(self._current_vks)
                     and special_keys.issubset(self._current_special | self._current_mods)
                     and not self._held):

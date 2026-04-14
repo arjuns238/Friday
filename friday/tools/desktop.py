@@ -387,6 +387,23 @@ async def filesystem_search(
     # Strip leading/trailing wildcards — find -iname always wraps in *...*
     clean_pattern = pattern.strip("*")
 
+    # Normalise separators: "pipette well detection" → regex matching any
+    # separator (space, underscore, dash, dot) between words so the user
+    # doesn't need to know the exact filename convention.
+    # Also allow doubled/tripled letters so typos like "pippette" match "pipette".
+    _SEP_RE = r"[\s_\-.*]+"          # split on any mix of separators/wildcards
+    words = re.split(_SEP_RE, clean_pattern)
+    words = [w for w in words if w]   # drop empties
+
+    def _fuzzy_word(word: str) -> str:
+        """Make each letter match 1+ repetitions: 'pipette' → 'p+i+p+e+t+t+e+'
+        so it also matches 'pippette', 'pipettte', etc."""
+        return "".join(re.escape(ch) + "+" if ch.isalpha() else re.escape(ch) for ch in word)
+
+    fuzzy_re = r"[_\- .]*".join(_fuzzy_word(w) for w in words) if len(words) > 1 else (
+        _fuzzy_word(words[0]) if words else None
+    )
+
     _PRUNE_DIRS = [
         "Library", "node_modules", ".venv", "venv", "__pycache__",
         ".git", ".Trash", "Caches", "Logs",
@@ -411,7 +428,8 @@ async def filesystem_search(
             fd_cmd = ["fd", "--type", "f", "--ignore-case", "--max-results", "50"]
             if include_hidden:
                 fd_cmd.append("--hidden")
-            fd_cmd.extend([clean_pattern, directory])
+            # Use regex mode for fuzzy matching (handles separators + doubled letters)
+            fd_cmd.extend(["--regex", fuzzy_re, directory])
             log.info("filesystem_search (fd): %s", " ".join(fd_cmd))
             proc = await loop.run_in_executor(
                 None,
@@ -429,7 +447,8 @@ async def filesystem_search(
         find_cmd = ["find", directory] + prune_expr
         if not include_hidden:
             find_cmd += ["(", "-not", "-path", "*/.*", ")"]
-        find_cmd += ["-type", "f", "-iname", f"*{clean_pattern}*", "-print"]
+        # find -iregex needs full path regex
+        find_cmd += ["-type", "f", "-iregex", f".*{fuzzy_re}.*", "-print"]
         log.info("filesystem_search (find): %s", " ".join(find_cmd))
         try:
             proc = await loop.run_in_executor(

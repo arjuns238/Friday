@@ -78,7 +78,7 @@ async def speak_interruptible(
     interrupted = False
     try:
         proc = await asyncio.create_subprocess_exec(
-            "afplay", tmp_path,
+            "afplay", "-v", str(config.TTS_VOLUME), tmp_path,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -145,7 +145,7 @@ def _play_via_afplay(mp3_bytes: bytes) -> None:
         f.write(mp3_bytes)
         tmp_path = f.name
     try:
-        subprocess.run(["afplay", tmp_path], check=True)
+        subprocess.run(["afplay", "-v", str(config.TTS_VOLUME), tmp_path], check=True)
     finally:
         try:
             os.unlink(tmp_path)

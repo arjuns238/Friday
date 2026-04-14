@@ -18,16 +18,17 @@ GOOGLE_API_KEY: str = os.environ.get("GOOGLE_API_KEY", "")
 TAVILY_API_KEY: str = os.environ.get("TAVILY_API_KEY", "")
 
 # ── Hotkey ────────────────────────────────────────────────────────────────────
-# Parsed by app.py into pynput key combos
-HOTKEY: str = os.environ.get("FRIDAY_HOTKEY", "ctrl+g")
 # Mute toggle key — silences mic without stopping the always-on loop
-MUTE_KEY: str = os.environ.get("FRIDAY_MUTE_KEY", "ctrl+shift+g")
+MUTE_KEY: str = os.environ.get("FRIDAY_MUTE_KEY", "ctrl+m")
 
 # ── Voice / TTS ───────────────────────────────────────────────────────────────
 # ElevenLabs voice ID — default: "Rachel" (21m00Tcm4TlvDq8ikWAM)
 ELEVENLABS_VOICE_ID: str = os.environ.get(
     "FRIDAY_VOICE_ID", "Xb7hH8MSUJpSbSDYk0k2"  # Alice — Clear, Engaging Educator
 )
+
+# ── TTS playback volume (afplay -v, 1.0 = normal, 2.0 = 2x louder) ──────
+TTS_VOLUME: float = float(os.environ.get("FRIDAY_TTS_VOLUME", "2"))
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
 AUDIO_SAMPLE_RATE: int = 16_000
@@ -71,7 +72,7 @@ _LLM_CONFIGS: dict[str, dict] = {
     },
 }
 
-DESKTOP_LLM_PROVIDER: str = os.environ.get("FRIDAY_DESKTOP_LLM", "gemini")
+DESKTOP_LLM_PROVIDER: str = os.environ.get("FRIDAY_DESKTOP_LLM", LLM_PROVIDER)
 
 # Directories the desktop subagent is allowed to search (Spotlight scope)
 DESKTOP_SEARCH_DIRS: list[str] = [
