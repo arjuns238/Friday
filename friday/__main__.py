@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime
+from datetime import date
 
 from friday import config
 
@@ -33,6 +33,7 @@ def main() -> None:
             import threading
             pass
             from friday.graph import build_graph
+            from friday.agent import build_friday_agent
             from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
             async def _test():
@@ -40,13 +41,17 @@ def main() -> None:
                 mute = threading.Event()
                 asyncio.get_event_loop().call_later(120, stop.set)
                 print("  Speak now... (auto-stops after 120s or press Ctrl+C)")
+                thread_id = date.today().isoformat()
                 async with AsyncSqliteSaver.from_conn_string(str(config.DB_PATH)) as checkpointer:
+                    agent = build_friday_agent(checkpointer)
                     graph = build_graph(checkpointer)
                     await graph.ainvoke(
                         {"done": False},
                         config={
                             "configurable": {
-                                "thread_id": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                                "thread_id": thread_id,
+                                "agent_thread_id": thread_id,
+                                "friday_agent": agent,
                                 "stop_event": stop,
                                 "mute_event": mute,
                                 "on_state_change": lambda s: print(f"  state: {s}"),

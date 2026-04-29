@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
+
+from langchain_core.tools import tool
 
 from friday import config
 
@@ -92,40 +94,6 @@ def _daily_note_path(d: date) -> Path:
     return config.MEMORY_DIR / f"{d.isoformat()}.md"
 
 
-def load_memory_context() -> str:
-    """Read all memory files, combine into a single string for system prompt injection.
-
-    Order: SOUL → USER → MEMORY → yesterday's note → today's note.
-    Truncates from the middle (preserves SOUL priority and recent notes).
-    """
-    ensure_defaults()
-
-    today = date.today()
-    yesterday = today - timedelta(days=1)
-
-    sections = [
-        _read_file(config.SOUL_PATH, "SOUL"),
-        _read_file(config.USER_PATH, "USER"),
-        _read_file(config.MEMORY_PATH, "MEMORY"),
-        _read_file(_daily_note_path(yesterday), f"NOTES {yesterday.isoformat()}"),
-        _read_file(_daily_note_path(today), f"NOTES {today.isoformat()}"),
-    ]
-
-    combined = "\n".join(s for s in sections if s)
-
-    if len(combined) > config.MEMORY_MAX_CHARS:
-        # Keep SOUL (first section) and recent notes (last sections) — trim MEMORY from end
-        soul = sections[0]
-        rest = "\n".join(s for s in sections[1:] if s)
-        budget = config.MEMORY_MAX_CHARS - len(soul) - 50  # 50 chars for truncation marker
-        if budget > 0 and len(rest) > budget:
-            rest = rest[-budget:]
-            rest = "[...truncated...]\n" + rest
-        combined = soul + "\n" + rest
-
-    return combined
-
-
 def append_daily_note(entry: str) -> None:
     """Append a timestamped line to today's daily note."""
     from datetime import datetime
@@ -141,8 +109,7 @@ def append_daily_note(entry: str) -> None:
             f.write(line)
 
 
-def save_to_memory(fact: str) -> str:
-    """Append a fact to MEMORY.md. Returns confirmation string."""
+def _save_to_memory(fact: str) -> str:
     ensure_defaults()
     with config.MEMORY_PATH.open("a", encoding="utf-8") as f:
         f.write(f"- {fact}\n")
@@ -150,10 +117,33 @@ def save_to_memory(fact: str) -> str:
     return f"Saved: {fact}"
 
 
-def save_to_profile(fact: str) -> str:
-    """Append a fact to USER.md. Returns confirmation string."""
+def _save_to_profile(fact: str) -> str:
     ensure_defaults()
     with config.USER_PATH.open("a", encoding="utf-8") as f:
         f.write(f"- {fact}\n")
     log.info("Saved to profile: %s", fact[:80])
     return f"Saved to profile: {fact}"
+
+
+@tool
+def save_memory(fact: str, category: str = "memory") -> str:
+    """Save a fact or preference to long-term memory.
+
+    Args:
+        fact: The fact to remember, written clearly.
+        category: "profile" for identity/preferences (name, role, tools, tech stack),
+            "memory" for everything else (project facts, reminders, events).
+    """
+    if category == "profile":
+        return _save_to_profile(fact)
+    return _save_to_memory(fact)
+
+
+@tool
+def memory_search(query: str) -> str:
+    """Search long-term memory and daily notes (FTS5). Returns matching snippets."""
+    from friday.memory.search import search as _search
+    results = _search(query)
+    if not results:
+        return "No matching memories found."
+    return "\n".join(f"[{r['source']}] {r['snippet']}" for r in results)

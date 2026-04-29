@@ -9,16 +9,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from datetime import datetime
+from datetime import date
 
 import rumps
 
 from friday import config
 
 log = logging.getLogger(__name__)
-
-# Unique per process — prevents resuming previous session on restart
-_SESSION_ID = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
 _STATE_ICONS = {
     "idle": "🎙",
@@ -90,14 +87,27 @@ class FridayApp(rumps.App):
 
     async def _run_pipeline(self) -> None:
         from friday.graph import build_graph
+        from friday.agent import build_friday_agent
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+        # One-time migration: archive old conversation DB, move to memory_v2.db
+        old_db = config.FRIDAY_DIR / "memory.db"
+        new_db = config.DB_PATH
+        if old_db.exists() and not new_db.exists():
+            old_db.rename(config.FRIDAY_DIR / "memory_v1.db.bak")
+            log.info("Migrated to deepagents state — old conversation DB archived at memory_v1.db.bak")
+
+        thread_id = date.today().isoformat()
 
         try:
             async with AsyncSqliteSaver.from_conn_string(str(config.DB_PATH)) as checkpointer:
+                agent = build_friday_agent(checkpointer)
                 graph = build_graph(checkpointer)
                 invoke_cfg = {
                     "configurable": {
-                        "thread_id": _SESSION_ID,
+                        "thread_id": thread_id,
+                        "agent_thread_id": thread_id,
+                        "friday_agent": agent,
                         "stop_event": self._stop_event,
                         "mute_event": self._mute_event,
                         "on_state_change": self._on_state_change,

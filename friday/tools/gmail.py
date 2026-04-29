@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from langchain_core.tools import tool
+
 from friday import config
 
 log = logging.getLogger(__name__)
@@ -21,12 +23,14 @@ SCOPES = [
 ]
 
 
+@tool
 async def draft_gmail(to: str, subject: str, body_instructions: str) -> str:
-    """Draft an email using Gemini for the body, then save to Gmail drafts.
+    """Draft an email (never sends). Creates a Gmail draft for user review.
 
-    Never sends — always creates a draft for user review.
-
-    Returns a spoken confirmation string.
+    Args:
+        to: Recipient email address.
+        subject: Email subject line.
+        body_instructions: Detailed instructions for drafting the body (tone, key points, length).
     """
     log.info("Drafting email to=%r subject=%r", to, subject)
 

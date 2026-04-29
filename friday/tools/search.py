@@ -4,17 +4,16 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from langchain_core.tools import tool
+
 from friday import config
 
 log = logging.getLogger(__name__)
 
 
+@tool
 async def web_search(query: str) -> str:
-    """Search the web and return a concise summary of results.
-
-    Returns formatted results as a string for GPT-4o to synthesize
-    into a spoken response, or directly speak if results are short.
-    """
+    """Search the web and return up to 3 results plus a direct answer if available."""
     log.info("Web search: %r", query)
 
     if not config.TAVILY_API_KEY:

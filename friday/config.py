@@ -74,6 +74,12 @@ _LLM_CONFIGS: dict[str, dict] = {
 
 DESKTOP_LLM_PROVIDER: str = os.environ.get("FRIDAY_DESKTOP_LLM", LLM_PROVIDER)
 
+# Default directory for file explorer browsing / reading
+FILE_EXPLORER_DIR: str = os.environ.get(
+    "FRIDAY_FILE_EXPLORER_DIR",
+    str(Path.home() / "Documents"),
+)
+
 # Directories the desktop subagent is allowed to search (Spotlight scope)
 DESKTOP_SEARCH_DIRS: list[str] = [
     d.strip()
@@ -115,8 +121,7 @@ def llm_config() -> dict:
 FRIDAY_DIR: Path = Path.home() / ".friday"
 FRIDAY_DIR.mkdir(exist_ok=True)
 GOOGLE_CREDS_PATH: Path = FRIDAY_DIR / "google_creds.json"
-CLAUDE_PIPE_PATH: Path = FRIDAY_DIR / "claude_input.pipe"
-DB_PATH: Path = FRIDAY_DIR / "memory.db"   # conversation history (AsyncSqliteSaver)
+DB_PATH: Path = FRIDAY_DIR / "memory_v2.db"   # conversation + agent state (AsyncSqliteSaver)
 
 # ── Memory ───────────────────────────────────────────────────────────────────
 MEMORY_DIR: Path = FRIDAY_DIR / "memory"
@@ -131,26 +136,19 @@ LOG_LEVEL: str = os.environ.get("FRIDAY_LOG_LEVEL", "INFO")
 
 
 def validate_phase0() -> list[str]:
-    """Return list of missing required keys for Phase 0."""
-    missing = []
+    """Return list of missing required keys.
 
-    # STT + TTS always required
+    The deepagents orchestrator runs on Claude Haiku 4.5 (ANTHROPIC_API_KEY).
+    Subagents run on Gemini Flash Lite via Google's OpenAI-compatible endpoint
+    (GOOGLE_API_KEY).
+    """
+    missing = []
     for name, val in [
         ("DEEPGRAM_API_KEY", DEEPGRAM_API_KEY),
         ("ELEVENLABS_API_KEY", ELEVENLABS_API_KEY),
+        ("ANTHROPIC_API_KEY", os.environ.get("ANTHROPIC_API_KEY", "")),
+        ("GOOGLE_API_KEY", GOOGLE_API_KEY),
     ]:
         if not val:
             missing.append(name)
-
-    # LLM key depends on active provider
-    cfg = _LLM_CONFIGS.get(LLM_PROVIDER, {})
-    key_val = cfg.get("api_key", lambda: "")()
-    key_names = {
-        "gemini": "GOOGLE_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "claude": "ANTHROPIC_API_KEY",
-    }
-    if not key_val:
-        missing.append(key_names.get(LLM_PROVIDER, "LLM_API_KEY"))
-
     return missing

@@ -1,9 +1,6 @@
-"""LangGraph state machine — replaces pipeline.py.
+"""LangGraph state machine — thin voice loop over the deepagents orchestrator.
 
-Provides conversation history (AsyncSqliteSaver, thread_id = today's date)
-and explicit typed state. Audio, TTS, and tool modules are unchanged.
-
-Flow (one graph.ainvoke() call per hotkey activation — loops internally):
+Flow (one graph.ainvoke() call per session — loops internally):
   listen → build → speak → [interrupt] → listen → ...
 
 Barge-in during build:  build_node returns audio=barge_audio → listen passthrough → build
@@ -26,9 +23,6 @@ from langgraph.graph.message import add_messages
 from langgraph.types import RunnableConfig
 
 log = logging.getLogger(__name__)
-
-# Track flushed message IDs to avoid re-flushing on consecutive builds
-_flushed_msg_ids: set[str] = set()
 
 _RESUME_RE = re.compile(
     r"\b(go on|continue|keep going|keep talking|go ahead|resume|"
@@ -53,33 +47,28 @@ def _get_events(config: dict) -> tuple[threading.Event, threading.Event]:
     return c["stop_event"], c["mute_event"]
 
 
+def _get_agent(config: dict):
+    agent = config.get("configurable", {}).get("friday_agent")
+    if agent is None:
+        raise RuntimeError("friday_agent missing from RunnableConfig.configurable")
+    return agent
+
+
 # ── State ──────────────────────────────────────────────────────────────────────
 
 class FridayState(TypedDict, total=False):
-    # Audio I/O (transient — cleared each cycle after use)
-    audio: Optional[bytes]           # audio segment to process next
-    barge_audio: Optional[bytes]     # audio captured during speak
-
-    # Processing outputs (for observability / LangSmith tracing)
+    audio: Optional[bytes]
+    barge_audio: Optional[bytes]
     transcript: str
-    tool_name: str
-    tool_args: dict
-    thinking: Optional[str]
-    tool_result: str
-    response_text: str               # final spoken text
-
-    # Control
-    is_resume: bool                  # True if barge was a "go on" / "continue" phrase
-    done: bool                       # True when stop_event fires → graph exits
-
-    # Conversation history — add_messages reducer appends; last N injected into LLM
+    response_text: str
+    is_resume: bool
+    done: bool
     messages: Annotated[list[BaseMessage], add_messages]
 
 
 # ── Node: listen ───────────────────────────────────────────────────────────────
 
 async def listen_node(state: FridayState, config: RunnableConfig) -> dict:
-    """Wait for speech onset, or pass through if audio is already queued."""
     from friday.capture.audio import listen_for_speech
 
     stop_event, mute_event = _get_events(config)
@@ -88,7 +77,6 @@ async def listen_node(state: FridayState, config: RunnableConfig) -> dict:
     if stop_event.is_set():
         return {"done": True}
 
-    # Audio already queued (barge-in from build or interrupt node) — skip listening
     if state.get("audio"):
         return {"barge_audio": None, "is_resume": False, "response_text": ""}
 
@@ -109,13 +97,8 @@ async def listen_node(state: FridayState, config: RunnableConfig) -> dict:
 # ── Node: build ────────────────────────────────────────────────────────────────
 
 async def build_node(state: FridayState, config: RunnableConfig) -> dict:
-    """Transcribe + LLM plan + (optional screenshot) + tool dispatch.
-
-    Runs a barge-in detector in parallel. If the user speaks during processing,
-    build is cancelled and their new audio is queued for the next cycle.
-    """
+    """Transcribe, then drive the deepagents orchestrator. Run barge-in in parallel."""
     from friday.capture.audio import _barge_in_sync
-    from friday.speak.elevenlabs import speak
 
     stop_event, mute_event = _get_events(config)
     _on_state(config, "processing")
@@ -124,6 +107,7 @@ async def build_node(state: FridayState, config: RunnableConfig) -> dict:
     if not audio:
         return {"response_text": "", "audio": None}
 
+    agent = _get_agent(config)
     loop = asyncio.get_running_loop()
     onset_event = threading.Event()
     cancel_event = threading.Event()
@@ -138,7 +122,7 @@ async def build_node(state: FridayState, config: RunnableConfig) -> dict:
     barge_thread.start()
 
     build_task = asyncio.create_task(
-        _do_build(audio, list(state.get("messages") or []), speak)
+        _do_build(agent, audio, config.get("configurable", {}).get("agent_thread_id"))
     )
     try:
         while not build_task.done() and not onset_event.is_set() and not stop_event.is_set():
@@ -152,14 +136,12 @@ async def build_node(state: FridayState, config: RunnableConfig) -> dict:
                 except asyncio.CancelledError:
                     pass
             await loop.run_in_executor(None, lambda: barge_done_event.wait(timeout=30))
-            # Concatenate original audio + barge audio so the full utterance
-            # (including the part spoken before the pause) gets re-transcribed.
             barge = barge_audio_ref[0] or b""
             combined = (audio or b"") + barge
             log.info("Barge-in during build — restarting with combined audio (%d+%d=%d bytes)",
                      len(audio or b""), len(barge), len(combined))
             return {
-                "audio": combined,  # queued: listen_node will passthrough
+                "audio": combined,
                 "response_text": "",
                 "transcript": "",
             }
@@ -176,6 +158,7 @@ async def build_node(state: FridayState, config: RunnableConfig) -> dict:
             return build_task.result()
         except Exception as exc:
             log.exception("Build error: %s", exc)
+            from friday.speak.elevenlabs import speak
             await speak("Sorry, something went wrong. Check the logs.")
             return {"response_text": "", "audio": None}
 
@@ -184,80 +167,66 @@ async def build_node(state: FridayState, config: RunnableConfig) -> dict:
         await loop.run_in_executor(None, lambda: barge_thread.join(timeout=0.2))
 
 
-async def _do_build(audio: bytes, history: list[BaseMessage], speak_fn) -> dict:
-    """Inner build (no barge detection): transcribe → plan → dispatch.
-
-    Two-pass flow: transcribe first (no screenshot), then if the LLM calls
-    take_screenshot, capture the screen and re-plan with visual context.
-    """
+async def _do_build(agent, audio: bytes, agent_thread_id: str | None) -> dict:
+    """Transcribe audio, invoke the deepagents orchestrator, return response text."""
     t0 = time.monotonic()
-    from friday.capture.screenshot import capture_focused_display
-    from friday.orchestrate.llm import plan_tool_call
-    from friday.tools.base import dispatch_tool
     from friday.transcribe.deepgram import transcribe
 
     transcript = await transcribe(audio)
-
     log.info("Transcript (%.0fms): %r", (time.monotonic() - t0) * 1000, transcript)
 
     if not transcript:
-        log.warning("Empty transcript, skipping")
         return {"response_text": "", "transcript": "", "audio": None}
 
-    # Pre-compaction flush: if messages are about to be dropped, summarize them
-    if len(history) > 12:
-        dropped = history[:-12]
-        asyncio.create_task(_flush_dropped_context(dropped))
+    invoke_config = {
+        "configurable": {"thread_id": agent_thread_id} if agent_thread_id else {},
+        "recursion_limit": 50,
+    }
 
-    history_dicts = _messages_to_dicts(history[-12:])
-
-    # Load memory context for system prompt injection
-    from friday.memory.context import load_memory_context
-    memory_context = load_memory_context()
-
-    # First pass: text-only routing (no screenshot)
-    tool_name, arguments, thinking = await plan_tool_call(
-        transcript, screenshot_b64=None, history=history_dicts, memory_context=memory_context
-    )
-    log.info("Plan pass 1 (%.0fms): tool=%s", (time.monotonic() - t0) * 1000, tool_name)
-
-    # If the LLM wants to see the screen, capture and re-route
-    if tool_name == "take_screenshot":
-        if thinking:
-            await speak_fn(thinking)
-        loop = asyncio.get_running_loop()
-        screenshot_b64 = await loop.run_in_executor(None, capture_focused_display)
-        tool_name, arguments, thinking = await plan_tool_call(
-            transcript, screenshot_b64=screenshot_b64, history=history_dicts, memory_context=memory_context
+    try:
+        result = await agent.ainvoke(
+            {"messages": [HumanMessage(content=transcript)]},
+            config=invoke_config,
         )
-        log.info("Plan pass 2 (%.0fms): tool=%s", (time.monotonic() - t0) * 1000, tool_name)
+    except Exception as exc:
+        log.exception("Agent invocation failed: %s", exc)
+        return {"response_text": "Sorry, something went wrong.", "transcript": transcript, "audio": None}
 
-    if thinking:
-        tool_result, _ = await asyncio.gather(
-            dispatch_tool(tool_name, arguments),
-            speak_fn(thinking),
-        )
-    else:
-        tool_result = await dispatch_tool(tool_name, arguments)
-
-    response_text = await _build_spoken_response(transcript, tool_name, tool_result)
-    log.info("Response ready (%.0fms): %r", (time.monotonic() - t0) * 1000, response_text[:80])
+    response_text = _extract_response(result)
+    log.info("Response ready (%.0fms): %r", (time.monotonic() - t0) * 1000, response_text[:120])
 
     return {
         "transcript": transcript,
-        "tool_name": tool_name,
-        "tool_args": arguments,
-        "thinking": thinking,
-        "tool_result": tool_result,
         "response_text": response_text,
-        "audio": None,  # consumed
+        "audio": None,
     }
+
+
+def _extract_response(agent_result: dict) -> str:
+    """Pull the last non-empty AIMessage content from the deepagents result."""
+    msgs = agent_result.get("messages") or []
+    for msg in reversed(msgs):
+        if isinstance(msg, AIMessage):
+            content = msg.content
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            if isinstance(content, list):
+                # Multimodal / structured content — pull text parts
+                parts: list[str] = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(block.get("text", ""))
+                    elif isinstance(block, str):
+                        parts.append(block)
+                joined = "".join(parts).strip()
+                if joined:
+                    return joined
+    return ""
 
 
 # ── Node: speak ────────────────────────────────────────────────────────────────
 
 async def speak_node(state: FridayState, config: RunnableConfig) -> dict:
-    """Speak the response; capture barge-in audio if the user interrupts."""
     from friday.speak.elevenlabs import speak_interruptible
 
     stop_event, mute_event = _get_events(config)
@@ -269,32 +238,28 @@ async def speak_node(state: FridayState, config: RunnableConfig) -> dict:
 
     interruption = await speak_interruptible(response_text, stop_event, mute_event)
 
-    # Append to conversation history after speaking
     new_msgs: list[BaseMessage] = []
     transcript = state.get("transcript", "")
     if transcript:
         new_msgs.append(HumanMessage(content=transcript))
     new_msgs.append(AIMessage(content=response_text))
 
-    # Fire-and-forget: log to daily note
     try:
         from friday.memory.context import append_daily_note
-        tool = state.get("tool_name", "")
-        summary = f"Q: {transcript[:80]} → [{tool}] A: {response_text[:80]}"
+        summary = f"Q: {transcript[:80]} → A: {response_text[:80]}"
         append_daily_note(summary)
     except Exception:
         log.debug("Daily note append failed", exc_info=True)
 
     return {
         "barge_audio": interruption,
-        "messages": new_msgs,  # add_messages reducer appends these
+        "messages": new_msgs,
     }
 
 
 # ── Node: interrupt ────────────────────────────────────────────────────────────
 
 async def interrupt_node(state: FridayState, config: RunnableConfig) -> dict:
-    """Transcribe barge audio; classify as resume intent or new query."""
     from friday.transcribe.deepgram import transcribe
 
     _on_state(config, "processing")
@@ -311,7 +276,7 @@ async def interrupt_node(state: FridayState, config: RunnableConfig) -> dict:
     log.info("New query from barge-in: %r", barge_transcript)
     return {
         "is_resume": False,
-        "audio": barge_audio,   # queue for listen_node passthrough → build
+        "audio": barge_audio,
         "barge_audio": None,
     }
 
@@ -327,7 +292,7 @@ def _route_build(state: FridayState) -> str:
         return END
     if state.get("response_text"):
         return "speak"
-    return "listen"  # barge-during-build (audio queued) or empty transcript
+    return "listen"
 
 
 def _route_speak(state: FridayState) -> str:
@@ -341,22 +306,6 @@ def _route_interrupt(state: FridayState) -> str:
 # ── Graph builder ──────────────────────────────────────────────────────────────
 
 def build_graph(checkpointer=None):
-    """Compile and return the Friday LangGraph state machine.
-
-    Example usage (in app.py):
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-        async with AsyncSqliteSaver.from_conn_string(str(config.DB_PATH)) as cp:
-            graph = build_graph(cp)
-            await graph.ainvoke(
-                {"done": False},
-                config={"configurable": {
-                    "thread_id": date.today().isoformat(),
-                    "stop_event": stop,
-                    "mute_event": mute,
-                    "on_state_change": callback,
-                }},
-            )
-    """
     g = StateGraph(FridayState)
 
     g.add_node("listen", listen_node)
@@ -378,94 +327,3 @@ def build_graph(checkpointer=None):
     )
 
     return g.compile(checkpointer=checkpointer)
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-async def _flush_dropped_context(dropped: list[BaseMessage]) -> None:
-    """Summarize dropped messages and append to today's daily note. Fire-and-forget."""
-    try:
-        # Deduplicate: only flush messages we haven't seen before
-        new_msgs = []
-        for msg in dropped:
-            msg_id = id(msg)
-            if msg_id not in _flushed_msg_ids:
-                _flushed_msg_ids.add(msg_id)
-                new_msgs.append(msg)
-
-        if not new_msgs:
-            return
-
-        from friday.memory.context import append_daily_note
-        from friday.orchestrate.llm import synthesize_response
-
-        # Build a compact summary prompt
-        lines = []
-        for msg in new_msgs:
-            content = str(msg.content)[:100]
-            role = "User" if isinstance(msg, HumanMessage) else "Friday"
-            lines.append(f"{role}: {content}")
-
-        conversation_text = "\n".join(lines)
-
-        from openai import AsyncOpenAI
-        from friday import config
-
-        cfg = config.llm_config()
-        client = AsyncOpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
-
-        response = await client.chat.completions.create(
-            model=cfg["model"],
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Summarize these conversation turns in 1-2 sentences. "
-                        "Focus on decisions, facts learned, and action items. Be concise."
-                    ),
-                },
-                {"role": "user", "content": conversation_text},
-            ],
-            max_tokens=128,
-        )
-
-        summary = response.choices[0].message.content or ""
-        if summary.strip():
-            append_daily_note(f"[context flush] {summary.strip()}")
-            log.info("Flushed %d dropped messages to daily note", len(new_msgs))
-
-    except Exception:
-        log.debug("Context flush failed", exc_info=True)
-
-
-def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict]:
-    """Convert LangChain messages to OpenAI-format dicts for LLM context injection."""
-    result = []
-    for msg in messages:
-        if isinstance(msg, HumanMessage):
-            result.append({"role": "user", "content": msg.content})
-        elif isinstance(msg, AIMessage):
-            result.append({"role": "assistant", "content": msg.content})
-    return result
-
-
-async def _build_spoken_response(transcript: str, tool_name: str, result: str) -> str:
-    if tool_name == "speak_answer":
-        return result
-    if tool_name == "draft_gmail":
-        return result
-    if tool_name == "web_search":
-        from friday.orchestrate.llm import synthesize_response
-        return await synthesize_response(transcript, result)
-    if tool_name == "desktop_query":
-        return result  # subagent already produces natural spoken answer
-    if tool_name == "open_file":
-        if "not found" in result.lower() or "failed" in result.lower():
-            return f"I couldn't open that. {result}"
-        return result
-    if tool_name == "save_memory":
-        return "Got it, I'll remember that."
-    if tool_name == "memory_search":
-        from friday.orchestrate.llm import synthesize_response
-        return await synthesize_response(transcript, result)
-    return result
