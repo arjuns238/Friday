@@ -1,122 +1,121 @@
 # Friday
 
-Voice-first AI orchestrator for macOS. Lives in your menu bar.
+Voice-first AI assistant for macOS. Lives in your menu bar, listens always, speaks back.
 
-Press a hotkey → speak → Friday sees your screen + hears you → routes to the right tool → speaks back.
+Press a hotkey to mute. Say "remember that I prefer Python." Ask about what's on your screen. Ask a current-events question — Friday will search the web and tell you.
 
-**Core use case**: Working in Claude Code on ML training. See something on the web. Press hotkey, say "try adding a residual block." Friday sees your screen, formulates the right prompt, injects it into your active Claude Code session.
-
----
-
-## Architecture
+**Architecture:** plain Python async loop. No agent framework. ~250 lines of glue.
 
 ```
-hotkey → screenshot + audio capture → Deepgram STT → GPT-4o vision → tool → ElevenLabs TTS
+listen → STT → LLM (+ optional screenshot) → tool → synthesize → TTS
+        ↑ barge-in detection runs in parallel during build & speak
 ```
-
-Target latency: **~700ms** hotkey to first spoken word.
-
-**Tools GPT-4o can call:**
-- `inject_claude_code` — types a prompt into the active iTerm2/Terminal Claude Code session
-- `draft_gmail` — drafts an email via Gemini Flash + Gmail API (never auto-sends)
-- `web_search` — Tavily web search
-- `speak_answer` — direct spoken response
 
 ---
 
 ## Setup
 
-### 1. Install dependencies
+### 1. Install
 
 ```bash
 uv sync
 ```
 
-Or with pip:
-```bash
-pip install -e .
-```
-
-**macOS audio note**: `webrtcvad` requires Python < 3.12 or a patched version. If it fails:
-```bash
-pip install webrtcvad-wheels
-```
-
-**pydub for MP3 playback** (optional, falls back to `afplay`):
-```bash
-pip install pydub
-brew install ffmpeg
-```
-
-### 2. Configure API keys
+### 2. API keys
 
 ```bash
 cp .env.example .env
-# Edit .env with your keys:
-# DEEPGRAM_API_KEY
-# OPENAI_API_KEY
-# ELEVENLABS_API_KEY
-# GOOGLE_API_KEY       (for Gmail drafting, Phase 3)
-# TAVILY_API_KEY       (for web search, optional)
 ```
+
+Required:
+- `DEEPGRAM_API_KEY` — STT
+- `ELEVENLABS_API_KEY` — TTS
+- One of `GOOGLE_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` (matching `FRIDAY_LLM`)
+
+Optional:
+- `TAVILY_API_KEY` — web search
 
 ### 3. macOS permissions
 
-You'll need to grant these permissions once (macOS will prompt):
-- **Accessibility** — for pynput global hotkey (`System Preferences → Privacy & Security → Accessibility`)
-- **Screen Recording** — for screenshot capture (`System Preferences → Privacy & Security → Screen Recording`)
-- **Microphone** — for audio capture
+Granted on first launch:
+- **Accessibility** — global mute hotkey
+- **Screen Recording** — screenshot tool
+- **Microphone** — voice input
 
 ### 4. Run
 
 ```bash
-# Start the menu bar app (default)
-friday
-
-# Or:
-python -m friday
+friday               # menu bar app
+python -m friday     # same thing
 ```
 
-The 🎙 icon appears in your menu bar. Hold `F2` to speak, release to process.
+A 🎙 icon appears in the menu bar. The always-on listening loop starts immediately.
 
 ---
 
-## CLI Commands
+## CLI
 
 ```bash
-friday                   # Start menu bar app
-friday setup-gmail       # One-time Gmail OAuth2 auth
-friday start-claude      # Start Claude Code via named pipe (Phase 4)
-friday test-pipeline     # Single invocation test (no menu bar)
+friday                  # menu bar app (default)
+friday test-pipeline    # 120s loop session, no menu bar — for debugging
+friday help             # this list
 ```
 
 ---
 
-## Phases
+## Tools
 
-| Phase | Goal | Status |
-|-------|------|--------|
-| 0 | Hotkey → speak → hear back | 🏗 Implement |
-| 1 | Screenshot → GPT-4o visual context | 🏗 Implement |
-| 2 | Claude Code CLI injection | 🏗 Implement |
-| 3 | Gmail draft integration | 🏗 Implement |
-| 4 | Named pipe, multi-monitor, polish | 📋 Planned |
+The LLM can do four things, or just answer directly with plain text (the default path):
+
+- `take_screenshot` — capture the focused display, then re-route with the screenshot in context
+- `web_search` — Tavily search, summarised into a spoken sentence
+- `save_memory` — append a fact to `~/.friday/MEMORY.md`
+- `memory_search` — substring search over `MEMORY.md` and `USER.md`
+
+Plain text from the LLM is spoken directly — no tool needed for "what's 2+2".
+
+---
+
+## Memory
+
+Three files in `~/.friday/`:
+
+- `SOUL.md` — Friday's personality, edited by you or untouched
+- `USER.md` — your profile, edit by hand
+- `MEMORY.md` — facts saved via `save_memory`, append-only
+
+All three are concatenated into the system prompt every turn (capped at `FRIDAY_MEMORY_MAX_CHARS`, default 8000).
+
+---
+
+## LLM provider
+
+Set `FRIDAY_LLM` in `.env`:
+
+| Value | Model | API key needed |
+|-------|-------|----------------|
+| `gemini` (default) | `gemini-3.1-flash-lite-preview` | `GOOGLE_API_KEY` |
+| `openai` | `gpt-4o` | `OPENAI_API_KEY` |
+| `claude` | `claude-haiku-4-5-20251001` | `ANTHROPIC_API_KEY` |
+
+All three use the OpenAI SDK — Gemini and Claude are reached through their OpenAI-compatible endpoints.
 
 ---
 
 ## Constraints
 
-- **Requires iTerm2** for in-session Claude Code injection (Terminal.app opens a new tab instead). Set iTerm2 as your default terminal.
-- **macOS only** — uses Apple-specific APIs (ScreenCaptureKit, osascript, rumps).
-- **Gmail requires OAuth2 setup** — run `friday setup-gmail` once, then credentials persist at `~/.friday/google_creds.json`.
+- **macOS only** — uses `Quartz`, `AVAudioEngine`, `afplay`, rumps.
+- The mute hotkey works system-wide; the listening loop is always on, but mute is always one key away.
 
 ---
 
-## Cost estimate (~50 queries/day)
+## Cost (~50 queries/day)
 
 | Service | Cost/day |
 |---------|----------|
-| Deepgram Nova-2 | ~$0.15 |
-| GPT-4o vision | ~$1.50 |
-| ElevenLabs Flash v2 | ~$0.30 |
-| **Total** | **~$2.00** |
+| Deepgram Nova-3 | ~$0.15 |
+| LLM (Gemini Flash) | ~$0.10 |
+| ElevenLabs Flash v2.5 | ~$0.30 |
+| **Total** | **~$0.55** |
+
+GPT-4o vision is more expensive (~$1.50/day) — switch to Gemini if cost matters.
