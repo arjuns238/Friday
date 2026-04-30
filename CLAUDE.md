@@ -34,7 +34,8 @@ friday/
 ├── config.py              env vars + typed settings + llm_config()
 ├── loop.py                main async voice loop ← CORE
 ├── llm.py                 LLM orchestration (plan_tool_call + synthesize_response)
-├── tools.py               4 tools + dispatch + Tavily web search
+├── tools.py               tools + dispatch + Tavily web search
+├── file_search.py         find_files / search_files (rg + Python fallback)
 ├── memory.py              SOUL.md / USER.md / MEMORY.md
 ├── capture/
 │   ├── audio.py           energy-based VAD + barge-in detection
@@ -84,7 +85,7 @@ Conversation history is `self._history: list[dict]` — last 12 turns are inject
 
 ## Tools (`tools.py`)
 
-Four tools, OpenAI function-calling format:
+OpenAI function-calling format:
 
 | Tool | Purpose |
 |------|---------|
@@ -92,6 +93,8 @@ Four tools, OpenAI function-calling format:
 | `web_search` | Tavily search (Tavily client embedded in `tools.py`) |
 | `save_memory` | Append a fact line to `MEMORY.md` |
 | `memory_search` | Case-insensitive substring scan over `MEMORY.md` + `USER.md` |
+| `find_files` | Glob file discovery under a directory (`file_search.py`) |
+| `search_files` | Regex content search under a directory (`file_search.py`) |
 
 Plus the synthetic `speak` tool name used when the LLM returned plain text.
 
@@ -135,6 +138,7 @@ Optional:
 | `FRIDAY_VAD_ONSET_FRAMES` | `5` | Frames (~150ms) to confirm speech onset |
 | `FRIDAY_VAD_OFFSET_FRAMES` | `25` | Frames (~750ms) of silence to end segment |
 | `FRIDAY_SCREENSHOT_MAX_KB` | `400` | Max screenshot size sent to LLM |
+| `FRIDAY_FILE_SEARCH_DEFAULT_ROOT` | — | Default `path` for `find_files` / `search_files` when user omits it |
 | `FRIDAY_LOG_LEVEL` | `INFO` | |
 
 ---

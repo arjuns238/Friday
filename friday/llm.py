@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from friday import config
 
@@ -29,6 +29,10 @@ Decision rules:
 - For current events, recent releases, prices, or facts you don't know → web_search
 - If the user says "remember this", "keep in mind", "don't forget", or states a strong preference → save_memory
 - If the user asks "do you remember", "what did we talk about" → memory_search
+- If the user wants to find files by name or extension (list Python files, all markdown in a folder) AND they name or imply a specific directory → find_files with that path and a glob_pattern
+- If the user wants to search inside files for text or code (grep-style: find a function name, TODO, string) AND they name or imply a specific directory → search_files with that path and a regex pattern
+- If the user asks to open a specific file path or says to open one of the files you just found → open_file
+- If they want to search their whole computer, "everywhere", or all files without naming a folder → do NOT use find_files or search_files. Respond in plain text and ask which folder to search (e.g. their project path or Desktop).
 - For everything else (factual questions, explanations, reasoning, opinions, conversation) → respond with plain text. The text you write will be spoken aloud directly.
 
 When a screenshot IS present:
@@ -47,21 +51,49 @@ def _build_system_prompt(memory_context: str | None = None) -> str:
     parts = []
     if memory_context:
         parts.append(memory_context)
+    if config.FILE_SEARCH_DEFAULT_ROOT is not None:
+        parts.append(
+            "When the user asks to search their project or files without naming a path, "
+            f"use this default directory for find_files and search_files `path`: "
+            f"{config.FILE_SEARCH_DEFAULT_ROOT}"
+        )
     parts.append(_ROUTING_RULES)
     return "\n\n".join(parts)
 
 
-async def plan_tool_call(
+def _truncate_tool_result(text: str, max_chars: int = 12_000) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 64] + "\n\n[Tool output truncated]"
+
+
+def _assistant_message_for_history(msg: object, tool_calls: list | None) -> dict:
+    out: dict = {"role": "assistant", "content": getattr(msg, "content", "") or ""}
+    if tool_calls:
+        out["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }
+            for tc in tool_calls
+        ]
+    return out
+
+
+async def run_tool_loop(
     transcript: str,
-    screenshot_b64: Optional[str] = None,
     history: Optional[list[dict]] = None,
     memory_context: Optional[str] = None,
-) -> tuple[str, dict, Optional[str]]:
-    """Call the LLM. Return (tool_name, arguments, thinking).
-
-    If the LLM responds with plain text instead of a tool call, returns
-    ("speak", {"answer": text}, None) so the caller speaks it directly.
-    """
+    dispatch_tool: Callable[[str, dict], Awaitable[str]] | None = None,
+    speak_thinking: Callable[[str], Awaitable[None]] | None = None,
+    capture_screenshot: Callable[[], Awaitable[str]] | None = None,
+    max_steps: int = 6,
+) -> tuple[str, list[dict]]:
+    """Run assistant/tool loop until end-turn; return spoken text + new history messages."""
     from openai import AsyncOpenAI
 
     from friday.tools import TOOL_DEFINITIONS
@@ -69,57 +101,96 @@ async def plan_tool_call(
     cfg = config.llm_config()
     client = AsyncOpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
 
-    user_content: list[dict] = []
-    if screenshot_b64:
-        user_content.append({
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{screenshot_b64}",
-                "detail": "high",
-            },
-        })
-    user_content.append({"type": "text", "text": f"User said: {transcript}"})
-
     messages: list[dict] = [{"role": "system", "content": _build_system_prompt(memory_context)}]
     if history:
         messages.extend(history)
-    messages.append({"role": "user", "content": user_content})
+    user_msg = {"role": "user", "content": f"User said: {transcript}"}
+    messages.append(user_msg)
+    new_history: list[dict] = [user_msg]
 
     t0 = time.monotonic()
     log.debug(
-        "Calling %s/%s (has_image=%s, transcript=%r)",
-        config.LLM_PROVIDER, cfg["model"], bool(screenshot_b64), transcript,
+        "Calling %s/%s (tool-loop, transcript=%r)",
+        config.LLM_PROVIDER, cfg["model"], transcript,
     )
 
-    response = await client.chat.completions.create(
-        model=cfg["model"],
-        messages=messages,
-        tools=TOOL_DEFINITIONS,
-        tool_choice="auto",
-        max_tokens=1024,
-    )
-    log.info("%s responded in %.0f ms", cfg["model"], (time.monotonic() - t0) * 1000)
-
-    msg = response.choices[0].message
-    tool_calls = getattr(msg, "tool_calls", None)
-
-    if tool_calls:
-        tc = tool_calls[0]
-        tool_name = tc.function.name
-        try:
-            arguments = json.loads(tc.function.arguments)
-        except json.JSONDecodeError:
-            arguments = {}
-        thinking = arguments.get("thinking")
-        log.info(
-            "Tool: %s  Thinking: %r  Args: %s",
-            tool_name, thinking, json.dumps(arguments, ensure_ascii=False)[:200],
+    for step in range(max_steps):
+        response = await client.chat.completions.create(
+            model=cfg["model"],
+            messages=messages,
+            tools=TOOL_DEFINITIONS,
+            tool_choice="auto",
+            max_tokens=1024,
         )
-        return tool_name, arguments, thinking
+        log.info("%s responded in %.0f ms (step %d)", cfg["model"], (time.monotonic() - t0) * 1000, step + 1)
 
-    text = (msg.content or "").strip()
-    log.info("Plain-text answer: %r", text[:120])
-    return "speak", {"answer": text}, None
+        msg = response.choices[0].message
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        assistant_msg = _assistant_message_for_history(msg, tool_calls)
+        messages.append(assistant_msg)
+        new_history.append(assistant_msg)
+
+        if not tool_calls:
+            text = (getattr(msg, "content", "") or "").strip()
+            log.info("Plain-text answer: %r", text[:120])
+            return text, new_history
+
+        if dispatch_tool is None:
+            raise RuntimeError("dispatch_tool callback is required for tool loops")
+
+        for tc in tool_calls:
+            tool_name = tc.function.name
+            try:
+                arguments = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+            thinking = arguments.get("thinking")
+            log.info(
+                "Tool: %s  Thinking: %r  Args: %s",
+                tool_name, thinking, json.dumps(arguments, ensure_ascii=False)[:200],
+            )
+            if thinking and speak_thinking:
+                await speak_thinking(thinking)
+
+            if tool_name == "take_screenshot" and capture_screenshot is not None:
+                b64 = await capture_screenshot()
+                tool_result = "Screenshot captured."
+                tool_msg = {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": tool_result,
+                }
+                messages.append(tool_msg)
+                new_history.append(tool_msg)
+                image_msg = {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Screenshot captured. Use it to answer the user."},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{b64}",
+                                "detail": "high",
+                            },
+                        },
+                    ],
+                }
+                messages.append(image_msg)
+                # Keep history small: store marker, not full image payload.
+                new_history.append({"role": "user", "content": "[screenshot provided]"})
+                continue
+
+            raw_result = await dispatch_tool(tool_name, arguments)
+            tool_result = _truncate_tool_result(raw_result)
+            tool_msg = {
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": tool_result,
+            }
+            messages.append(tool_msg)
+            new_history.append(tool_msg)
+
+    return "I ran into too many tool steps and stopped.", new_history
 
 
 async def synthesize_response(user_query: str, tool_result: str) -> str:

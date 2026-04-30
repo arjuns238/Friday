@@ -65,12 +65,16 @@ friday help             # this list
 
 ## Tools
 
-The LLM can do four things, or just answer directly with plain text (the default path):
+The LLM can use the tools below, or just answer directly with plain text (the default path):
 
 - `take_screenshot` — capture the focused display, then re-route with the screenshot in context
 - `web_search` — Tavily search, summarised into a spoken sentence
 - `save_memory` — append a fact to `~/.friday/MEMORY.md`
 - `memory_search` — substring search over `MEMORY.md` and `USER.md`
+- `find_files` — list files under a directory matching a glob (e.g. `*.md`, `**/*.py`); results are summarised for speech
+- `search_files` — regex search inside files (`files_with_matches`, `content`, or `count`); uses [ripgrep](https://github.com/BurntSushi/ripgrep) when `rg` is on your `PATH`, otherwise a bounded Python fallback
+
+Optional `FRIDAY_FILE_SEARCH_DEFAULT_ROOT` in `.env` gives the model a default folder when you say “search my project” without naming a path. For very broad requests (“search my whole computer”), the model is instructed to ask you which directory to use.
 
 Plain text from the LLM is spoken directly — no tool needed for "what's 2+2".
 

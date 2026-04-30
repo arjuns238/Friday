@@ -76,6 +76,23 @@ def llm_config() -> dict:
     }
 
 
+# ── File search (optional default root for LLM hints) ─────────────────────────
+def _optional_existing_dir(env_key: str) -> Path | None:
+    raw = os.environ.get(env_key, "").strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    try:
+        r = p.resolve(strict=False)
+    except OSError:
+        return None
+    return r if r.is_dir() else None
+
+
+FILE_SEARCH_DEFAULT_ROOT: Path | None = _optional_existing_dir(
+    "FRIDAY_FILE_SEARCH_DEFAULT_ROOT"
+)
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 FRIDAY_DIR: Path = Path.home() / ".friday"
 FRIDAY_DIR.mkdir(exist_ok=True)
