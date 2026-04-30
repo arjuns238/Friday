@@ -18,7 +18,7 @@ from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
-_HISTORY_MAX_TURNS = 12   # last N user/assistant pairs injected into LLM context
+_HISTORY_MAX_MESSAGES = 36
 
 _RESUME_RE = re.compile(
     r"\b(go on|continue|keep going|keep talking|go ahead|resume|"
@@ -177,7 +177,7 @@ class Loop:
         t0 = time.monotonic()
 
         from friday.capture.screenshot import capture_focused_display
-        from friday.llm import plan_tool_call
+        from friday.llm import run_tool_loop
         from friday.memory import load_memory_context
         from friday.speak.elevenlabs import speak
         from friday.tools import dispatch_tool
@@ -192,61 +192,26 @@ class Loop:
             log.warning("Empty transcript, skipping")
             return None
 
-        history = self._history[-_HISTORY_MAX_TURNS * 2:]  # role/content pairs
+        history = self._history[-_HISTORY_MAX_MESSAGES:]
         memory_context = load_memory_context()
 
-        # Pass 1: text-only routing
-        tool_name, arguments, thinking = await plan_tool_call(
-            transcript, screenshot_b64=None, history=history, memory_context=memory_context
-        )
-        log.info("Plan pass 1 (%.0fms): tool=%s", (time.monotonic() - t0) * 1000, tool_name)
-
-        # Pass 2: if LLM wants vision, capture and re-plan
-        if tool_name == "take_screenshot":
-            if thinking:
-                await speak(thinking)
+        async def _capture_screenshot() -> str:
             loop = asyncio.get_running_loop()
-            screenshot_b64 = await loop.run_in_executor(None, capture_focused_display)
-            tool_name, arguments, thinking = await plan_tool_call(
-                transcript,
-                screenshot_b64=screenshot_b64,
-                history=history,
-                memory_context=memory_context,
-            )
-            log.info("Plan pass 2 (%.0fms): tool=%s", (time.monotonic() - t0) * 1000, tool_name)
+            return await loop.run_in_executor(None, capture_focused_display) or ""
 
-        # Speak thinking + run tool in parallel
-        if thinking:
-            tool_result, _ = await asyncio.gather(
-                dispatch_tool(tool_name, arguments),
-                speak(thinking),
-            )
-        else:
-            tool_result = await dispatch_tool(tool_name, arguments)
-
-        spoken_text = await _build_spoken_response(transcript, tool_name, tool_result)
+        spoken_text, new_messages = await run_tool_loop(
+            transcript=transcript,
+            history=history,
+            memory_context=memory_context,
+            dispatch_tool=dispatch_tool,
+            speak_thinking=speak,
+            capture_screenshot=_capture_screenshot,
+        )
         log.info("Response ready (%.0fms): %r", (time.monotonic() - t0) * 1000, spoken_text[:80])
 
-        # Append to in-memory history (will be injected on next turn)
-        self._history.append({"role": "user", "content": transcript})
-        self._history.append({"role": "assistant", "content": spoken_text})
-        # Keep history bounded
-        if len(self._history) > _HISTORY_MAX_TURNS * 2:
-            self._history = self._history[-_HISTORY_MAX_TURNS * 2:]
+        # Persist full tool-loop messages for subsequent turns.
+        self._history.extend(new_messages)
+        if len(self._history) > _HISTORY_MAX_MESSAGES:
+            self._history = self._history[-_HISTORY_MAX_MESSAGES:]
 
         return spoken_text
-
-
-async def _build_spoken_response(transcript: str, tool_name: str, result: str) -> str:
-    """Convert tool result into the actual text to speak."""
-    if tool_name in ("speak", "speak_answer"):
-        return result
-    if tool_name == "web_search":
-        from friday.llm import synthesize_response
-        return await synthesize_response(transcript, result)
-    if tool_name == "save_memory":
-        return "Got it, I'll remember that."
-    if tool_name == "memory_search":
-        from friday.llm import synthesize_response
-        return await synthesize_response(transcript, result)
-    return result
