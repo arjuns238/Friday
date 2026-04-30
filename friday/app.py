@@ -9,16 +9,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from datetime import datetime
 
 import rumps
 
 from friday import config
 
 log = logging.getLogger(__name__)
-
-# Unique per process — prevents resuming previous session on restart
-_SESSION_ID = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
 _STATE_ICONS = {
     "idle": "🎙",
@@ -89,34 +85,19 @@ class FridayApp(rumps.App):
         self._refresh_title()
 
     async def _run_pipeline(self) -> None:
-        from friday.graph import build_graph
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        from friday.loop import Loop
 
-        try:
-            async with AsyncSqliteSaver.from_conn_string(str(config.DB_PATH)) as checkpointer:
-                graph = build_graph(checkpointer)
-                invoke_cfg = {
-                    "configurable": {
-                        "thread_id": _SESSION_ID,
-                        "stop_event": self._stop_event,
-                        "mute_event": self._mute_event,
-                        "on_state_change": self._on_state_change,
-                    },
-                    "recursion_limit": 500,
-                }
-                # Re-invoke the graph if it exits unexpectedly
-                # (e.g. recursion limit hit, transient error).
-                while not self._stop_event.is_set():
-                    try:
-                        await graph.ainvoke({"done": False}, config=invoke_cfg)
-                    except Exception as exc:
-                        if self._stop_event.is_set():
-                            break
-                        log.error("Graph exited unexpectedly: %s — restarting", exc)
-                        continue
-                    break  # normal exit (stop_event or done=True)
-        except Exception as exc:
-            log.exception("Pipeline fatal error: %s", exc)
+        loop = Loop(on_state_change=self._on_state_change)
+        # Restart the loop if it exits unexpectedly (transient error)
+        while not self._stop_event.is_set():
+            try:
+                await loop.run(self._stop_event, self._mute_event)
+            except Exception as exc:
+                if self._stop_event.is_set():
+                    break
+                log.error("Loop exited unexpectedly: %s — restarting", exc)
+                continue
+            break
 
     def _on_state_change(self, state: str) -> None:
         self._pipeline_state = state
@@ -220,7 +201,7 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
 
 
 def run() -> None:
-    missing = config.validate_phase0()
+    missing = config.validate_keys()
     if missing:
         rumps.alert(
             title="Friday — Missing API Keys",
