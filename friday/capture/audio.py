@@ -10,11 +10,17 @@ import logging
 import math
 import struct
 import threading
+import warnings
 from typing import Optional
+
+import numpy as np
 
 from friday import config
 
 log = logging.getLogger(__name__)
+
+_vad_lock = threading.Lock()
+_webrtc_vad: object | bool | None = None  # Vad instance, False if init failed, None not tried
 
 _FRAME_MS = 30
 _FRAME_SAMPLES = config.AUDIO_SAMPLE_RATE * _FRAME_MS // 1000  # 480 @ 16kHz
@@ -27,6 +33,75 @@ def _rms(data: bytes) -> float:
         return 0.0
     samples = struct.unpack(f"{n}h", data)
     return math.sqrt(sum(s * s for s in samples) / n)
+
+
+def _barge_impulse_like_frame(frame: bytes) -> bool:
+    """True if energy is concentrated like a tap/clack, not spread like speech."""
+    if not config.BARGE_IMPULSE_REJECT or len(frame) < 128:
+        return False
+    x = np.frombuffer(frame, dtype=np.int16).astype(np.float64)
+    a = np.abs(x)
+    sq = np.sort(a * a)
+    total = float(sq.sum())
+    if total < 1.0:
+        return False
+    # Single-sample dominance (sharp transient)
+    if (float(np.max(a)) ** 2) / total > 0.07:
+        return True
+    # >55% of energy in a tiny fraction of samples (desk tap, finger snap)
+    target = 0.55 * total
+    csum = 0.0
+    n = 0
+    for v in sq[::-1]:
+        csum += v
+        n += 1
+        if csum >= target:
+            break
+    return (n / len(x)) <= 0.05
+
+
+def _barge_onset_likely(frame: bytes, rms: float) -> bool:
+    """True when this frame should count toward barge-in speech onset.
+
+    Uses WebRTC VAD on top of RMS so impulsive non-speech (crinkling, taps) does
+    not cancel TTS. Impulse-shaped energy is rejected even if WebRTC misfires.
+    Once onset fires, recording still uses energy-only offset.
+    """
+    if _barge_impulse_like_frame(frame):
+        return False
+    if rms <= config.VAD_SPEECH_THRESHOLD:
+        return False
+    if not config.BARGE_WEBRTC_VAD:
+        return True
+
+    global _webrtc_vad
+    with _vad_lock:
+        if _webrtc_vad is None:
+            try:
+                # webrtcvad still imports pkg_resources; setuptools warns — not actionable here.
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message="pkg_resources is deprecated",
+                        category=UserWarning,
+                    )
+                    import webrtcvad
+
+                _webrtc_vad = webrtcvad.Vad(config.BARGE_VAD_AGGRESSIVENESS)
+            except Exception as exc:
+                log.warning(
+                    "webrtcvad unavailable (%s) — barge-in onset falls back to energy only",
+                    exc,
+                )
+                _webrtc_vad = False
+        vad = _webrtc_vad
+
+    if vad is False:
+        return True
+    try:
+        return bool(vad.is_speech(frame, config.AUDIO_SAMPLE_RATE))  # type: ignore[union-attr]
+    except Exception:
+        return True
 
 
 def _barge_in_sync(
@@ -54,7 +129,7 @@ def _barge_in_sync(
     silence_frames = 0
     in_speech = False
     max_frames = (config.MAX_RECORDING_SECONDS * 1000) // _FRAME_MS
-    _BARGE_ONSET = 3  # frames: faster detection for natural interruption feel
+    onset_need = config.BARGE_ONSET_FRAMES
 
     with sd.RawInputStream(
         samplerate=config.AUDIO_SAMPLE_RATE,
@@ -72,16 +147,15 @@ def _barge_in_sync(
 
             frame = _SILENCE_FRAME if mute_event.is_set() else bytes(data)
             rms = _rms(frame)
-            is_speech = rms > config.VAD_SPEECH_THRESHOLD
 
             if not in_speech:
                 pre_roll.append(frame)
                 if len(pre_roll) > config.VAD_PRE_ROLL_FRAMES:
                     pre_roll.pop(0)
 
-                if is_speech:
+                if _barge_onset_likely(frame, rms):
                     speech_frames += 1
-                    if speech_frames >= _BARGE_ONSET:
+                    if speech_frames >= onset_need:
                         in_speech = True
                         recording = pre_roll.copy()
                         pre_roll.clear()
@@ -92,6 +166,7 @@ def _barge_in_sync(
                 else:
                     speech_frames = max(0, speech_frames - 1)
             else:
+                is_speech = rms > config.VAD_SPEECH_THRESHOLD
                 recording.append(frame)
                 if len(recording) >= max_frames:
                     break

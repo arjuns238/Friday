@@ -6,6 +6,8 @@ Search is a plain case-insensitive substring scan — no FTS5, no sqlite.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from pathlib import Path
 
 from friday import config
 
@@ -68,6 +70,32 @@ def _read_section(path, label: str) -> str:
     if not text:
         return ""
     return f"[{label}]\n{text}\n"
+
+
+def today_session_path() -> Path:
+    """Path to today's compressed session markdown under ~/.friday/sessions/."""
+    day = datetime.now().strftime("%Y-%m-%d")
+    return config.SESSIONS_DIR / f"{day}.md"
+
+
+def read_today_session_markdown_excerpt(max_chars: int = 2400) -> str:
+    """Tail of today's session file for prompt injection (truncated)."""
+    path = today_session_path()
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        log.warning("Could not read session file %s: %s", path, exc)
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return "[…]\n" + text[-(max_chars - 8) :]
+
+
+def load_session_context() -> str:
+    """Today's compressed session log excerpt (same source as part of SessionLog.get_prompt_context)."""
+    return read_today_session_markdown_excerpt(max_chars=2400)
 
 
 def load_memory_context() -> str:

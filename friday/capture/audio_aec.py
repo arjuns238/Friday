@@ -22,14 +22,13 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from friday import config
+from friday.capture.audio import _barge_onset_likely
 
 log = logging.getLogger(__name__)
 
 _FRAME_MS = 30
 _FRAME_SAMPLES = config.AUDIO_SAMPLE_RATE * _FRAME_MS // 1000  # 480 @ 16kHz
 _SILENCE_FRAME = bytes(_FRAME_SAMPLES * 2)  # all-zero int16 frame
-_BARGE_ONSET = 3  # frames — fast onset for natural interruption feel
-
 _engine = None
 _engine_lock = threading.Lock()
 _resample_up: int = 1    # updated in _get_engine(): up/down = TARGET_RATE/HW_RATE
@@ -358,16 +357,15 @@ def _barge_in_sync_aec(
 
         frame = _SILENCE_FRAME if is_muted else _to_int16_bytes(raw)
         rms = _rms(frame)
-        is_speech = rms > config.VAD_SPEECH_THRESHOLD
 
         if not in_speech:
             pre_roll.append(frame)
             if len(pre_roll) > config.VAD_PRE_ROLL_FRAMES:
                 pre_roll.pop(0)
 
-            if is_speech:
+            if _barge_onset_likely(frame, rms):
                 speech_frames += 1
-                if speech_frames >= _BARGE_ONSET:
+                if speech_frames >= config.BARGE_ONSET_FRAMES:
                     in_speech = True
                     recording = pre_roll.copy()
                     pre_roll.clear()
@@ -378,6 +376,7 @@ def _barge_in_sync_aec(
             else:
                 speech_frames = max(0, speech_frames - 1)
         else:
+            is_speech = rms > config.VAD_SPEECH_THRESHOLD
             recording.append(frame)
             if len(recording) >= max_frames:
                 break

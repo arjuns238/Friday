@@ -1,16 +1,25 @@
-"""Screenshot capture using Quartz/ScreenCaptureKit on macOS.
+"""Screenshot capture using Quartz on macOS.
 
-Captures the display containing the currently focused window,
-compresses to JPEG under the configured size limit, and returns
-base64-encoded bytes ready for the OpenAI vision API.
+Resolves the display to capture in this order:
+
+1. The active display for the frontmost app's largest normal (layer 0) window,
+   by intersecting ``kCGWindowBounds`` with ``CGDisplayBounds`` (same coordinate
+   space as the window server — not ``NSScreen.frame``, which can differ).
+2. The display under the mouse, using ``CGEventGetLocation`` (same space as
+   ``CGDisplayBounds`` — not ``NSEvent.mouseLocation``, which is Cocoa-flipped).
+3. ``CGMainDisplayID()`` as a last resort.
+
+Compresses to JPEG under the configured size limit and returns base64-encoded
+bytes for the vision API.
 """
 from __future__ import annotations
 
 import base64
 import io
 import logging
+import os
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from friday import config
 
@@ -18,7 +27,7 @@ log = logging.getLogger(__name__)
 
 
 def capture_focused_display() -> Optional[str]:
-    """Capture the focused display and return base64-encoded JPEG string.
+    """Capture the best-matching display and return base64-encoded JPEG string.
 
     Returns None if capture fails (e.g. screen recording permission denied).
     """
@@ -38,20 +47,137 @@ def capture_focused_display() -> Optional[str]:
     return b64
 
 
+def _active_display_ids() -> tuple[int, ...]:
+    import Quartz
+
+    err, _, count = Quartz.CGGetActiveDisplayList(0, None, None)
+    if err != Quartz.kCGErrorSuccess or count == 0:
+        return (Quartz.CGMainDisplayID(),)
+    err2, displays, _ = Quartz.CGGetActiveDisplayList(count, None, None)
+    if err2 != Quartz.kCGErrorSuccess or not displays:
+        return (Quartz.CGMainDisplayID(),)
+    return tuple(int(x) for x in displays)
+
+
+def _screencapture_argv_for_display(display_id: int) -> list[str]:
+    """Return extra argv fragment for ``screencapture`` (e.g. ``-D`` ``2``).
+
+    ``man screencapture``: -D <n> where 1 is main, 2 secondary, matching the
+    order returned by ``CGGetActiveDisplayList``. Falls back to ``-m`` if the
+    id is not in the active list.
+    """
+    ids = _active_display_ids()
+    for i, did in enumerate(ids):
+        if did == display_id:
+            return ["-D", str(i + 1)]
+    return ["-m"]
+
+
+def _cg_rect_from_window_bounds(bounds: dict[str, Any]) -> Any:
+    import Quartz
+
+    def gv(key: str) -> float:
+        v = bounds.get(key)
+        if v is None:
+            return 0.0
+        return float(v)
+
+    return Quartz.CGRectMake(gv("X"), gv("Y"), gv("Width"), gv("Height"))
+
+
+def _display_id_for_frontmost_window() -> Optional[int]:
+    """Largest on-screen layer-0 window of the frontmost app → display by intersection."""
+    import Quartz
+    from AppKit import NSWorkspace
+
+    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    if app is None:
+        return None
+    pid = app.processIdentifier()
+    if pid == os.getpid():
+        return None
+
+    opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+    window_list = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
+    if not window_list:
+        return None
+
+    best_area = 0.0
+    best_rect = None
+    for entry in window_list:
+        if entry.get(Quartz.kCGWindowOwnerPID) != pid:
+            continue
+        if entry.get(Quartz.kCGWindowLayer, 0) != 0:
+            continue
+        name = entry.get(Quartz.kCGWindowName) or ""
+        owner = entry.get(Quartz.kCGWindowOwnerName) or ""
+        if name == "Desktop" and owner == "Finder":
+            continue
+        bounds = entry.get(Quartz.kCGWindowBounds)
+        if not bounds:
+            continue
+        rect = _cg_rect_from_window_bounds(bounds)
+        a = rect.size.width * rect.size.height
+        if a > best_area:
+            best_area = a
+            best_rect = rect
+
+    if best_rect is None or best_area < 1.0:
+        return None
+
+    best_display: Optional[int] = None
+    best_inter = 0.0
+    for did in _active_display_ids():
+        db = Quartz.CGDisplayBounds(did)
+        inter = Quartz.CGRectIntersection(db, best_rect)
+        ia = inter.size.width * inter.size.height
+        if ia > best_inter:
+            best_inter = ia
+            best_display = did
+
+    if best_display is not None and best_inter > 0:
+        log.debug("Screenshot display from frontmost window intersection: %s", best_display)
+        return best_display
+    return None
+
+
+def _display_id_for_mouse() -> Optional[int]:
+    """Display whose ``CGDisplayBounds`` contains ``CGEventGetLocation``."""
+    import Quartz
+
+    ev = Quartz.CGEventCreate(None)
+    if ev is None:
+        return None
+    loc = Quartz.CGEventGetLocation(ev)
+    for did in _active_display_ids():
+        if Quartz.CGRectContainsPoint(Quartz.CGDisplayBounds(did), loc):
+            log.debug("Screenshot display from mouse location: %s", did)
+            return int(did)
+    return None
+
+
+def _resolve_capture_display_id() -> int:
+    import Quartz
+
+    for resolver in (_display_id_for_frontmost_window, _display_id_for_mouse):
+        did = resolver()
+        if did is not None:
+            return int(did)
+    main = Quartz.CGMainDisplayID()
+    log.debug("Screenshot display fallback: CGMainDisplayID %s", main)
+    return int(main)
+
+
 def _capture_via_quartz():
-    """Use Quartz (CoreGraphics) to capture the main display.
+    """Use Quartz (CoreGraphics) to capture the resolved display.
 
     Falls back to screencapture CLI if pyobjc is unavailable.
     """
     try:
         import Quartz
-        from AppKit import NSScreen
         from PIL import Image
 
-        # Determine which display to capture: the one with the key window.
-        # For simplicity, capture the main display (index 0).
-        # Phase 4 can improve this to detect the focused display.
-        display_id = Quartz.CGMainDisplayID()
+        display_id = _resolve_capture_display_id()
 
         image_ref = Quartz.CGDisplayCreateImage(display_id)
         if image_ref is None:
@@ -61,12 +187,12 @@ def _capture_via_quartz():
         width = Quartz.CGImageGetWidth(image_ref)
         height = Quartz.CGImageGetHeight(image_ref)
 
-        # Convert CGImage → PIL Image via bitmap data
         bitmapData = Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(image_ref))
         if bitmapData is None:
             return None
 
         import ctypes
+
         buf = (ctypes.c_uint8 * len(bitmapData)).from_buffer_copy(bytes(bitmapData))
         img = Image.frombuffer("RGBA", (width, height), bytes(buf), "raw", "BGRA", 0, 1)
         img = img.convert("RGB")
@@ -78,7 +204,7 @@ def _capture_via_quartz():
 
 
 def _capture_via_cli():
-    """Fallback: use macOS `screencapture` CLI tool."""
+    """Fallback: use macOS ``screencapture`` CLI tool."""
     import subprocess
     import tempfile
     from PIL import Image
@@ -86,8 +212,15 @@ def _capture_via_cli():
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         tmp_path = f.name
 
+    extra: list[str] = ["-m"]
+    try:
+        did = _resolve_capture_display_id()
+        extra = _screencapture_argv_for_display(did)
+    except ImportError:
+        pass
+
     result = subprocess.run(
-        ["screencapture", "-x", "-m", tmp_path],
+        ["screencapture", "-x", *extra, tmp_path],
         capture_output=True,
         timeout=5,
     )
@@ -96,8 +229,9 @@ def _capture_via_cli():
         return None
 
     img = Image.open(tmp_path).convert("RGB")
-    import os
-    os.unlink(tmp_path)
+    import os as os_mod
+
+    os_mod.unlink(tmp_path)
     return img
 
 
