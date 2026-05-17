@@ -26,6 +26,9 @@ dependencies = [
     # Screenshot (macOS only)
     "pyobjc>=9.0; sys_platform == 'darwin'",
     "Pillow>=10.0.0",
+    "webrtcvad>=2.0.10",
+    # webrtcvad imports pkg_resources (deprecated in setuptools ≥81; pin below for compatibility)
+    "setuptools>=70,<81",
 ]
 
 [project.scripts]

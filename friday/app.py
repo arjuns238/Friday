@@ -2,7 +2,7 @@
 
 Uses rumps for the menu bar and pynput for the mute hotkey.
 The always-on listening loop starts automatically on launch.
-Mute key (ctrl+m): silences mic input without stopping the loop.
+Mute key (ctrl+m — left or right Control): silences mic input without stopping the loop.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import logging
 import threading
 
 import rumps
+from rumps.events import before_quit
 
 from friday import config
 
@@ -41,6 +42,8 @@ class FridayApp(rumps.App):
         self._muted = False
         self._pipeline_state = "idle"
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._session_log = None
+        self._ambient_loop = None
 
         self._loop_thread = threading.Thread(target=self._start_loop, daemon=True)
         self._loop_thread.start()
@@ -51,7 +54,68 @@ class FridayApp(rumps.App):
         )
         self._mute_listener.start()
 
+        before_quit.register(self._on_before_quit)
+
+        if config.FRIDAY_DEV_MODE:
+            dev = rumps.MenuItem("Dev")
+            dev.add(
+                rumps.MenuItem(
+                    "Simulate: Stuck on Error",
+                    callback=lambda _: self._schedule_simulate("stuck_on_error"),
+                )
+            )
+            dev.add(
+                rumps.MenuItem(
+                    "Simulate: Angry Email",
+                    callback=lambda _: self._schedule_simulate("angry_email"),
+                )
+            )
+            dev.add(
+                rumps.MenuItem(
+                    "Simulate: Repeated Azure Task",
+                    callback=lambda _: self._schedule_simulate("repeated_azure_task"),
+                )
+            )
+            dev.add(
+                rumps.MenuItem(
+                    "Simulate: Context Switch After Meeting",
+                    callback=lambda _: self._schedule_simulate(
+                        "context_switch_after_meeting"
+                    ),
+                )
+            )
+            self.menu.add(dev)
+
         log.info("Friday started — %s to toggle mute", config.MUTE_KEY)
+
+    def _schedule_simulate(self, scenario_name: str) -> None:
+        log.info("[SIM] menu requested scenario=%r", scenario_name)
+        ambient = self._ambient_loop
+        loop = self._loop
+        if ambient is None or loop is None or loop.is_closed():
+            log.warning("[SIM] ambient loop or asyncio loop not ready — ignored")
+            return
+        asyncio.run_coroutine_threadsafe(
+            ambient.simulate_proactive(scenario_name),
+            loop,
+        )
+
+    def _on_before_quit(self) -> None:
+        self._stop_event.set()
+        if self._loop is None or self._loop.is_closed():
+            return
+        if self._session_log is None:
+            return
+        from friday.ambient.now_writer import write_now_md
+
+        fut = asyncio.run_coroutine_threadsafe(
+            write_now_md(self._session_log),
+            self._loop,
+        )
+        try:
+            fut.result(timeout=25)
+        except Exception:
+            log.exception("NOW.md shutdown write failed")
 
     @rumps.clicked("About Friday")
     def about(self, _):
@@ -85,17 +149,43 @@ class FridayApp(rumps.App):
         self._refresh_title()
 
     async def _run_pipeline(self) -> None:
+        from friday.ambient.conversation_log import ConversationJsonlLog, new_session_id
+        from friday.ambient.loop import AmbientLoop
+        from friday.ambient.now_writer import read_now_md
+        from friday.ambient.session_log import SessionLog
         from friday.loop import Loop
 
-        loop = Loop(on_state_change=self._on_state_change)
-        # Restart the loop if it exits unexpectedly (transient error)
+        session_log = SessionLog()
+        now_text = read_now_md()
+        if now_text.strip():
+            session_log.seed_startup_from_now(now_text)
+        self._session_log = session_log
+
+        config.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        conv_path = config.SESSIONS_DIR / f"{new_session_id()}.jsonl"
+        conversation_log = ConversationJsonlLog(conv_path)
+        log.info("Conversation transcript: %s", conv_path)
+
+        voice = Loop(
+            on_state_change=self._on_state_change,
+            session_log=session_log,
+            conversation_log=conversation_log,
+        )
+        ambient = AmbientLoop(
+            session_log, self._stop_event, self._mute_event, voice_loop=voice
+        )
+        self._ambient_loop = ambient
+
         while not self._stop_event.is_set():
             try:
-                await loop.run(self._stop_event, self._mute_event)
+                await asyncio.gather(
+                    ambient.run(),
+                    voice.run(self._stop_event, self._mute_event),
+                )
             except Exception as exc:
                 if self._stop_event.is_set():
                     break
-                log.error("Loop exited unexpectedly: %s — restarting", exc)
+                log.error("Pipeline exited unexpectedly: %s — restarting", exc)
                 continue
             break
 
@@ -128,7 +218,10 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
     _MOD_MAP = {
         "option": keyboard.Key.alt, "alt": keyboard.Key.alt,
         "cmd": keyboard.Key.cmd, "command": keyboard.Key.cmd,
-        "ctrl": keyboard.Key.ctrl, "control": keyboard.Key.ctrl,
+        # "ctrl"/"control" handled separately so either left or right Control counts (macOS).
+        "ctrl_r": keyboard.Key.ctrl_r,
+        "rctrl": keyboard.Key.ctrl_r,
+        "right_ctrl": keyboard.Key.ctrl_r,
         "shift": keyboard.Key.shift,
     }
     _SPECIAL_KEY_MAP = {
@@ -141,8 +234,12 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
     modifier_keys: set = set()
     char_vks: set = set()
     special_keys: set = set()
+    # Generic ctrl/control: accept Key.ctrl (left) or Key.ctrl_r (right), not == on one key only.
+    match_any_ctrl = any(p in ("ctrl", "control") for p in parts)
 
     for part in parts:
+        if part in ("ctrl", "control"):
+            continue
         if part in _MOD_MAP:
             modifier_keys.add(_MOD_MAP[part])
         elif part in _SPECIAL_KEY_MAP:
@@ -155,9 +252,13 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
         else:
             log.warning("Unknown hotkey part: %r", part)
 
+    _ctrl_family = frozenset(
+        {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
+    )
+
     log.info(
-        "Hotkey %r: mods=%s vks=%s special=%s",
-        key_combo, modifier_keys, char_vks, special_keys,
+        "Hotkey %r: any_ctrl=%s mods=%s vks=%s special=%s",
+        key_combo, match_any_ctrl, modifier_keys, char_vks, special_keys,
     )
 
     class _Listener(keyboard.Listener):
@@ -168,6 +269,13 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
             self._current_vks: set = set()
             self._current_special: set = set()
 
+        def _mods_match(self) -> bool:
+            if match_any_ctrl:
+                has_ctrl = bool(self._current_mods & _ctrl_family)
+                other_mods = self._current_mods - _ctrl_family
+                return has_ctrl and other_mods == modifier_keys
+            return modifier_keys == self._current_mods
+
         def _on_press(self, key):
             if isinstance(key, keyboard.Key):
                 self._current_mods.add(key)
@@ -177,7 +285,7 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
                 else:
                     self._current_special.add(key)
 
-            if (modifier_keys == self._current_mods
+            if (self._mods_match()
                     and char_vks.issubset(self._current_vks)
                     and special_keys.issubset(self._current_special | self._current_mods)
                     and not self._held):
@@ -186,7 +294,10 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
 
         def _on_release(self, key):
             if isinstance(key, keyboard.Key):
-                if self._held and key in modifier_keys:
+                if self._held and (
+                    key in modifier_keys
+                    or (match_any_ctrl and key in _ctrl_family)
+                ):
                     self._held = False
                 self._current_mods.discard(key)
             elif isinstance(key, keyboard.KeyCode):

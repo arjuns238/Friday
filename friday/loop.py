@@ -14,7 +14,11 @@ import logging
 import re
 import threading
 import time
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    from friday.ambient.conversation_log import ConversationJsonlLog
+    from friday.ambient.session_log import SessionLog
 
 log = logging.getLogger(__name__)
 
@@ -35,9 +39,41 @@ def _is_resume_intent(transcript: str) -> bool:
 class Loop:
     """Always-on voice loop. One run() call drives the whole app."""
 
-    def __init__(self, on_state_change: Optional[Callable[[str], None]] = None) -> None:
+    def __init__(
+        self,
+        on_state_change: Optional[Callable[[str], None]] = None,
+        session_log: Optional["SessionLog"] = None,
+        conversation_log: Optional["ConversationJsonlLog"] = None,
+    ) -> None:
         self._on_state = on_state_change or (lambda _: None)
         self._history: list[dict] = []  # OpenAI-format {role, content} dicts
+        self._session_log = session_log
+        self._conversation_log = conversation_log
+        # Proactive TTS waits until the user has heard at least one reactive reply.
+        self._proactive_tts_permitted = threading.Event()
+
+    async def interrupt_proactive(self, trigger_output: dict[str, str]) -> Optional[str]:
+        """Main agent: ambient structured signal → spoken line or None (SKIP)."""
+        from friday.llm import compose_proactive_message
+        from friday.memory import load_memory_context
+
+        memory_context = load_memory_context()
+        session_context = (
+            self._session_log.get_prompt_context()
+            if self._session_log is not None
+            else ""
+        )
+        history = self._history[-_HISTORY_MAX_MESSAGES:]
+        return await compose_proactive_message(
+            memory_context=memory_context,
+            session_context=session_context,
+            history=history,
+            trigger_output=trigger_output,
+        )
+
+    def proactive_speech_permitted(self) -> bool:
+        """True after the first reactive reply has finished playing (not proactive TTS)."""
+        return self._proactive_tts_permitted.is_set()
 
     async def run(self, stop_event: threading.Event, mute_event: threading.Event) -> None:
         from friday.capture.audio import listen_for_speech
@@ -77,6 +113,7 @@ class Loop:
                 interruption = await speak_interruptible(response_to_speak, stop_event, mute_event)
 
                 if interruption is None:
+                    self._proactive_tts_permitted.set()
                     break
 
                 self._on_state("processing")
@@ -166,6 +203,7 @@ class Loop:
                 log.exception("Build response error: %s", exc)
                 self._on_state("speaking")
                 await speak("Sorry, something went wrong. Check the logs.")
+                self._proactive_tts_permitted.set()
                 return None, None
 
         finally:
@@ -194,6 +232,11 @@ class Loop:
 
         history = self._history[-_HISTORY_MAX_MESSAGES:]
         memory_context = load_memory_context()
+        session_context = (
+            self._session_log.get_prompt_context()
+            if self._session_log is not None
+            else ""
+        )
 
         async def _capture_screenshot() -> str:
             loop = asyncio.get_running_loop()
@@ -203,6 +246,7 @@ class Loop:
             transcript=transcript,
             history=history,
             memory_context=memory_context,
+            session_context=session_context,
             dispatch_tool=dispatch_tool,
             speak_thinking=speak,
             capture_screenshot=_capture_screenshot,
@@ -213,5 +257,8 @@ class Loop:
         self._history.extend(new_messages)
         if len(self._history) > _HISTORY_MAX_MESSAGES:
             self._history = self._history[-_HISTORY_MAX_MESSAGES:]
+
+        if self._conversation_log is not None and spoken_text:
+            self._conversation_log.append_turn(transcript, spoken_text)
 
         return spoken_text

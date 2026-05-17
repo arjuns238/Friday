@@ -19,6 +19,19 @@ from friday import config
 
 log = logging.getLogger(__name__)
 
+_PROACTIVE_USER_FACING = """\
+You are Friday — the same voice assistant as in normal turns (SOUL/personality above).
+
+You will receive an internal **ambient proactive signal** from the background monitor.
+That signal is NOT something the user said. It is a structured hint: reason, observation,
+suggested_intervention.
+
+Your job:
+- Read conversation history: do not repeat something you already said about this.
+- Decide if interrupting is worth it; if not, reply exactly: SKIP
+- If yes, write what Friday should speak aloud next (1–2 sentences), in your voice.
+No markdown, no bullets, no URLs."""
+
 _ROUTING_RULES = """\
 You receive a voice transcript of what the user said. You may also receive a screenshot if one was captured.
 
@@ -28,6 +41,7 @@ Decision rules:
 - If the user references something on their screen ("look at this", "what's on my screen", "this code", "this email", "read this") AND no screenshot is present → take_screenshot
 - For current events, recent releases, prices, or facts you don't know → web_search
 - If the user says "remember this", "keep in mind", "don't forget", or states a strong preference → save_memory
+- After save_memory succeeds: do not tell the user you saved anything, wrote to disk, or use memory files; reply in plain text with a brief natural acknowledgment of what they said, or move on
 - If the user asks "do you remember", "what did we talk about" → memory_search
 - If the user wants to find files by name or extension (list Python files, all markdown in a folder) AND they name or imply a specific directory → find_files with that path and a glob_pattern
 - If the user wants to search inside files for text or code (grep-style: find a function name, TODO, string) AND they name or imply a specific directory → search_files with that path and a regex pattern
@@ -47,10 +61,22 @@ Style for plain-text answers (these get spoken aloud):
 For tools that have a `thinking` field, fill it with a natural, brief phrase that acknowledges what you're about to do. It will be spoken immediately while the tool runs."""
 
 
-def _build_system_prompt(memory_context: str | None = None) -> str:
+def _build_system_prompt(
+    memory_context: str | None = None,
+    session_context: str | None = None,
+) -> str:
     parts = []
     if memory_context:
         parts.append(memory_context)
+    sc = (session_context or "").strip()
+    if sc:
+        parts.append(
+            "WHAT YOU HAVE BEEN OBSERVING THIS SESSION:\n"
+            + sc
+            + "\n\nYou have been watching the user's screen continuously. Use this context to give "
+            "grounded, specific responses. Do not ask them to explain what they're working on — "
+            "you already know. Reference specific details when relevant."
+        )
     if config.FILE_SEARCH_DEFAULT_ROOT is not None:
         parts.append(
             "When the user asks to search their project or files without naming a path, "
@@ -84,10 +110,68 @@ def _assistant_message_for_history(msg: object, tool_calls: list | None) -> dict
     return out
 
 
+async def compose_proactive_message(
+    memory_context: str,
+    session_context: str,
+    history: Optional[list[dict]],
+    trigger_output: dict[str, str],
+) -> Optional[str]:
+    """Main agent: format, personality, redundancy check — speak or SKIP."""
+    from openai import AsyncOpenAI
+
+    cfg = config.llm_config()
+    client = AsyncOpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
+
+    parts: list[str] = []
+    if memory_context:
+        parts.append(memory_context)
+    sc = (session_context or "").strip()
+    if sc:
+        parts.append("WHAT YOU HAVE BEEN OBSERVING THIS SESSION:\n" + sc)
+    parts.append(_PROACTIVE_USER_FACING)
+    system = "\n\n".join(parts)
+
+    reason = trigger_output.get("reason", "")
+    observation = trigger_output.get("observation", "")
+    intervention = trigger_output.get("suggested_intervention", "")
+
+    messages: list[dict] = [{"role": "system", "content": system}]
+    if history:
+        messages.extend(history)
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "## Ambient proactive signal (internal — user did not say this)\n\n"
+                f"reason: {reason}\n"
+                f"observation: {observation}\n"
+                f"suggested_intervention: {intervention}\n\n"
+                "Decide whether to speak. Reply exactly SKIP, or the exact words to speak aloud."
+            ),
+        },
+    )
+
+    t0 = time.monotonic()
+    response = await client.chat.completions.create(
+        model=cfg["model"],
+        messages=messages,
+        max_tokens=160,
+    )
+    raw = (response.choices[0].message.content or "").strip()
+    log.info("Proactive compose %.0f ms: %r", (time.monotonic() - t0) * 1000, raw[:120])
+    if not raw:
+        return None
+    norm = raw.upper().rstrip(".!?")
+    if norm == "SKIP":
+        return None
+    return raw
+
+
 async def run_tool_loop(
     transcript: str,
     history: Optional[list[dict]] = None,
     memory_context: Optional[str] = None,
+    session_context: str = "",
     dispatch_tool: Callable[[str, dict], Awaitable[str]] | None = None,
     speak_thinking: Callable[[str], Awaitable[None]] | None = None,
     capture_screenshot: Callable[[], Awaitable[str]] | None = None,
@@ -101,7 +185,12 @@ async def run_tool_loop(
     cfg = config.llm_config()
     client = AsyncOpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
 
-    messages: list[dict] = [{"role": "system", "content": _build_system_prompt(memory_context)}]
+    messages: list[dict] = [
+        {
+            "role": "system",
+            "content": _build_system_prompt(memory_context, session_context or None),
+        }
+    ]
     if history:
         messages.extend(history)
     user_msg = {"role": "user", "content": f"User said: {transcript}"}
@@ -149,7 +238,7 @@ async def run_tool_loop(
                 "Tool: %s  Thinking: %r  Args: %s",
                 tool_name, thinking, json.dumps(arguments, ensure_ascii=False)[:200],
             )
-            if thinking and speak_thinking:
+            if thinking and speak_thinking and tool_name != "save_memory":
                 await speak_thinking(thinking)
 
             if tool_name == "take_screenshot" and capture_screenshot is not None:

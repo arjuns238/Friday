@@ -25,6 +25,12 @@ def main() -> None:
             import asyncio
             import threading
 
+            import tempfile
+            from pathlib import Path
+
+            from friday.ambient.conversation_log import ConversationJsonlLog, new_session_id
+            from friday.ambient.loop import AmbientLoop
+            from friday.ambient.session_log import SessionLog
             from friday.loop import Loop
 
             async def _test() -> None:
@@ -32,8 +38,18 @@ def main() -> None:
                 mute = threading.Event()
                 asyncio.get_event_loop().call_later(120, stop.set)
                 print("  Speak now... (auto-stops after 120s or press Ctrl+C)")
-                loop = Loop(on_state_change=lambda s: print(f"  state: {s}"))
-                await loop.run(stop, mute)
+                session_log = SessionLog()
+                with tempfile.TemporaryDirectory() as td:
+                    conv = ConversationJsonlLog(
+                        Path(td) / f"{new_session_id()}.jsonl"
+                    )
+                    voice = Loop(
+                        on_state_change=lambda s: print(f"  state: {s}"),
+                        session_log=session_log,
+                        conversation_log=conv,
+                    )
+                    ambient = AmbientLoop(session_log, stop, mute, voice_loop=voice)
+                    await asyncio.gather(ambient.run(), voice.run(stop, mute))
 
             print("Running Friday loop (test mode)...")
             asyncio.run(_test())

@@ -35,6 +35,21 @@ VAD_ONSET_FRAMES: int = int(os.environ.get("FRIDAY_VAD_ONSET_FRAMES", "5"))
 VAD_OFFSET_FRAMES: int = int(os.environ.get("FRIDAY_VAD_OFFSET_FRAMES", "25"))
 VAD_PRE_ROLL_FRAMES: int = 10
 
+# Barge-in during TTS / build: WebRTC VAD rejects many non-speech noises (bags, clicks).
+_BARGE_VAD_RAW = os.environ.get("FRIDAY_BARGE_WEBRTC_VAD", "1").strip().lower()
+BARGE_WEBRTC_VAD: bool = _BARGE_VAD_RAW not in ("0", "false", "no", "off")
+BARGE_VAD_AGGRESSIVENESS: int = min(
+    3,
+    max(0, int(os.environ.get("FRIDAY_BARGE_VAD_AGGRESSIVENESS", "2"))),
+)
+# Consecutive 30ms frames that must pass energy + VAD + impulse check before barge fires.
+BARGE_ONSET_FRAMES: int = max(
+    2,
+    min(20, int(os.environ.get("FRIDAY_BARGE_ONSET_FRAMES", "6"))),
+)
+_BARGE_IMPULSE_RAW = os.environ.get("FRIDAY_BARGE_IMPULSE_REJECT", "1").strip().lower()
+BARGE_IMPULSE_REJECT: bool = _BARGE_IMPULSE_RAW not in ("0", "false", "no", "off")
+
 # ── Screenshot ────────────────────────────────────────────────────────────────
 SCREENSHOT_MAX_KB: int = int(os.environ.get("FRIDAY_SCREENSHOT_MAX_KB", "400"))
 SCREENSHOT_JPEG_QUALITY: int = 80
@@ -100,6 +115,29 @@ SOUL_PATH: Path = FRIDAY_DIR / "SOUL.md"
 USER_PATH: Path = FRIDAY_DIR / "USER.md"
 MEMORY_PATH: Path = FRIDAY_DIR / "MEMORY.md"
 MEMORY_MAX_CHARS: int = int(os.environ.get("FRIDAY_MEMORY_MAX_CHARS", "8000"))
+
+# ── Ambient loop (screen context + proactive trigger) ─────────────────────────
+FRIDAY_AMBIENT_INTERVAL: int = int(os.environ.get("FRIDAY_AMBIENT_INTERVAL", "60"))
+FRIDAY_TRIGGER_INTERVAL: int = int(os.environ.get("FRIDAY_TRIGGER_INTERVAL", "300"))
+FRIDAY_SESSION_LOG_MAX: int = int(os.environ.get("FRIDAY_SESSION_LOG_MAX", "60"))
+FRIDAY_COMPRESS_INTERVAL: int = int(os.environ.get("FRIDAY_COMPRESS_INTERVAL", "900"))
+SESSIONS_DIR: Path = FRIDAY_DIR / "sessions"
+# Append-only raw captures (one JSON object per line, NDJSON). Never truncated by compression.
+SESSION_LOG_PATH: Path = SESSIONS_DIR / "session_log.json"
+# Small mutable state (compression timestamps), separate from the immutable raw log.
+SESSION_LOG_STATE_PATH: Path = SESSIONS_DIR / "ambient_state.json"
+NOW_PATH: Path = FRIDAY_DIR / "NOW.md"
+LEGACY_SESSION_LOG_PATH: Path = FRIDAY_DIR / "session_log.json"
+
+# ── Developer ─────────────────────────────────────────────────────────────────
+def _env_bool(key: str, default: bool = False) -> bool:
+    raw = os.environ.get(key, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+FRIDAY_DEV_MODE: bool = _env_bool("FRIDAY_DEV_MODE", False)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = os.environ.get("FRIDAY_LOG_LEVEL", "INFO")
