@@ -2,7 +2,7 @@
 
 Uses rumps for the menu bar and pynput for the mute hotkey.
 The always-on listening loop starts automatically on launch.
-Mute key (ctrl+m): silences mic input without stopping the loop.
+Mute key (ctrl+m — left or right Control): silences mic input without stopping the loop.
 """
 from __future__ import annotations
 
@@ -218,7 +218,10 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
     _MOD_MAP = {
         "option": keyboard.Key.alt, "alt": keyboard.Key.alt,
         "cmd": keyboard.Key.cmd, "command": keyboard.Key.cmd,
-        "ctrl": keyboard.Key.ctrl, "control": keyboard.Key.ctrl,
+        # "ctrl"/"control" handled separately so either left or right Control counts (macOS).
+        "ctrl_r": keyboard.Key.ctrl_r,
+        "rctrl": keyboard.Key.ctrl_r,
+        "right_ctrl": keyboard.Key.ctrl_r,
         "shift": keyboard.Key.shift,
     }
     _SPECIAL_KEY_MAP = {
@@ -231,8 +234,12 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
     modifier_keys: set = set()
     char_vks: set = set()
     special_keys: set = set()
+    # Generic ctrl/control: accept Key.ctrl (left) or Key.ctrl_r (right), not == on one key only.
+    match_any_ctrl = any(p in ("ctrl", "control") for p in parts)
 
     for part in parts:
+        if part in ("ctrl", "control"):
+            continue
         if part in _MOD_MAP:
             modifier_keys.add(_MOD_MAP[part])
         elif part in _SPECIAL_KEY_MAP:
@@ -245,9 +252,13 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
         else:
             log.warning("Unknown hotkey part: %r", part)
 
+    _ctrl_family = frozenset(
+        {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
+    )
+
     log.info(
-        "Hotkey %r: mods=%s vks=%s special=%s",
-        key_combo, modifier_keys, char_vks, special_keys,
+        "Hotkey %r: any_ctrl=%s mods=%s vks=%s special=%s",
+        key_combo, match_any_ctrl, modifier_keys, char_vks, special_keys,
     )
 
     class _Listener(keyboard.Listener):
@@ -258,6 +269,13 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
             self._current_vks: set = set()
             self._current_special: set = set()
 
+        def _mods_match(self) -> bool:
+            if match_any_ctrl:
+                has_ctrl = bool(self._current_mods & _ctrl_family)
+                other_mods = self._current_mods - _ctrl_family
+                return has_ctrl and other_mods == modifier_keys
+            return modifier_keys == self._current_mods
+
         def _on_press(self, key):
             if isinstance(key, keyboard.Key):
                 self._current_mods.add(key)
@@ -267,7 +285,7 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
                 else:
                     self._current_special.add(key)
 
-            if (modifier_keys == self._current_mods
+            if (self._mods_match()
                     and char_vks.issubset(self._current_vks)
                     and special_keys.issubset(self._current_special | self._current_mods)
                     and not self._held):
@@ -276,7 +294,10 @@ def _build_hotkey_listener(key_combo: str, on_trigger):
 
         def _on_release(self, key):
             if isinstance(key, keyboard.Key):
-                if self._held and key in modifier_keys:
+                if self._held and (
+                    key in modifier_keys
+                    or (match_any_ctrl and key in _ctrl_family)
+                ):
                     self._held = False
                 self._current_mods.discard(key)
             elif isinstance(key, keyboard.KeyCode):

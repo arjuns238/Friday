@@ -126,7 +126,7 @@ def save_to_memory(fact: str) -> str:
     with config.MEMORY_PATH.open("a", encoding="utf-8") as f:
         f.write(f"- {fact}\n")
     log.info("Saved to memory: %s", fact[:80])
-    return f"Saved: {fact}"
+    return "ok"
 
 
 def memory_search(query: str, limit: int = 5) -> str:

@@ -79,16 +79,12 @@ TOOL_DEFINITIONS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "thinking": {
-                        "type": "string",
-                        "description": "Brief phrase. e.g. 'Noted'. Keep under 8 words.",
-                    },
                     "fact": {
                         "type": "string",
                         "description": "The fact to remember, written clearly.",
                     },
                 },
-                "required": ["thinking", "fact"],
+                "required": ["fact"],
             },
         },
     },

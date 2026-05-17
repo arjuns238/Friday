@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import threading
 import time
 
 from friday import config
@@ -39,10 +38,8 @@ def format_activity_digest(entries: list[dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def _hard_rules_block(entries: list[dict[str, str]], mute_event: threading.Event) -> bool:
+def _hard_rules_block(entries: list[dict[str, str]]) -> bool:
     """True → skip LLM; no signal."""
-    if mute_event.is_set():
-        return True
     if len(entries) >= 3:
         acts = {e.get("activity", "").lower() for e in entries[-3:]}
         if len(acts) == 1:
@@ -82,10 +79,9 @@ def parse_proactive_trigger_payload(raw: str) -> dict[str, str] | None:
 
 async def evaluate_proactive_trigger(
     entries: list[dict[str, str]],
-    mute_event: threading.Event,
 ) -> dict[str, str] | None:
     """Background LLM: structured explanation for main agent, or None."""
-    if _hard_rules_block(entries, mute_event):
+    if _hard_rules_block(entries):
         return None
 
     from openai import AsyncOpenAI

@@ -8,7 +8,10 @@ from friday import config
 
 log = logging.getLogger(__name__)
 
-_SYSTEM = """Look at the screenshot. Reply with exactly three lines and nothing else:
+_SYSTEM = """You are summarizing what is on screen for a voice assistant's session log.
+Infer the user's current activity from visible UI: editor, browser, terminal, mail, video call, etc. Be specific; avoid vague labels like "using computer".
+
+Reply with exactly three lines and nothing else (no code fences, no preamble):
 activity: <one of: coding | reading | browsing | writing | terminal | meeting | other>
 app: <short application name>
 detail: <one concrete artifact: file name, URL, error line, or document title — max 120 chars>

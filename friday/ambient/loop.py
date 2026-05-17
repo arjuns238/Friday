@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -162,6 +164,7 @@ class AmbientLoop:
         self._stop = stop_event
         self._mute = mute_event
         self._voice = voice_loop
+        self._ambient_capture_hashes: deque[bytes] = deque(maxlen=3)
 
     async def simulate_proactive(self, scenario_name: str) -> None:
         """Dev-only: run the same proactive path as _trigger_loop with fake get_recent entries."""
@@ -170,9 +173,6 @@ class AmbientLoop:
         log.info("[SIM] simulate_proactive start scenario=%r", scenario_name)
         if scenario_name not in SIMULATE_SCENARIOS:
             log.warning("[SIM] unknown scenario: %r", scenario_name)
-            return
-        if self._mute.is_set():
-            log.info("[SIM] skipped (muted)")
             return
         if self._voice is not None and not self._voice.proactive_speech_permitted():
             log.info(
@@ -195,7 +195,7 @@ class AmbientLoop:
                 "[SIM] evaluating proactive trigger (%d synthetic entries)",
                 len(entries),
             )
-            signal = await evaluate_proactive_trigger(entries, self._mute)
+            signal = await evaluate_proactive_trigger(entries)
             if not signal:
                 log.info("[SIM] no signal (hard rules or ambient LLM declined)")
                 return
@@ -243,17 +243,30 @@ class AmbientLoop:
             try:
                 loop = asyncio.get_running_loop()
                 b64 = await loop.run_in_executor(None, capture_focused_display)
-                if b64:
-                    snap = await extract_context(b64)
-                    hhmm = datetime.now().strftime("%H:%M")
-                    self._session_log.append(
-                        {
-                            "time": hhmm,
-                            "activity": snap.get("activity", "other"),
-                            "app": snap.get("app", "unknown"),
-                            "detail": snap.get("detail", ""),
-                        }
-                    )
+                if not b64:
+                    self._ambient_capture_hashes.clear()
+                else:
+                    digest = hashlib.sha256(b64.encode("ascii")).digest()
+                    self._ambient_capture_hashes.append(digest)
+                    if (
+                        len(self._ambient_capture_hashes) == 3
+                        and len(set(self._ambient_capture_hashes)) == 1
+                    ):
+                        log.debug(
+                            "Ambient screenshot unchanged (last 3 identical) — "
+                            "skipping extract_context and session append"
+                        )
+                    else:
+                        snap = await extract_context(b64)
+                        hhmm = datetime.now().strftime("%H:%M")
+                        self._session_log.append(
+                            {
+                                "time": hhmm,
+                                "activity": snap.get("activity", "other"),
+                                "app": snap.get("app", "unknown"),
+                                "detail": snap.get("detail", ""),
+                            }
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -340,14 +353,12 @@ class AmbientLoop:
             first_tick = False
             if self._stop.is_set():
                 break
-            if self._mute.is_set():
-                continue
             if self._voice is not None and not self._voice.proactive_speech_permitted():
                 log.debug("Proactive skipped: awaiting first reactive reply")
                 continue
             try:
                 entries = self._session_log.get_recent(5)
-                signal = await evaluate_proactive_trigger(entries, self._mute)
+                signal = await evaluate_proactive_trigger(entries)
                 if not signal:
                     continue
                 if self._voice is None:

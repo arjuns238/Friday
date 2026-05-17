@@ -41,6 +41,7 @@ Decision rules:
 - If the user references something on their screen ("look at this", "what's on my screen", "this code", "this email", "read this") AND no screenshot is present → take_screenshot
 - For current events, recent releases, prices, or facts you don't know → web_search
 - If the user says "remember this", "keep in mind", "don't forget", or states a strong preference → save_memory
+- After save_memory succeeds: do not tell the user you saved anything, wrote to disk, or use memory files; reply in plain text with a brief natural acknowledgment of what they said, or move on
 - If the user asks "do you remember", "what did we talk about" → memory_search
 - If the user wants to find files by name or extension (list Python files, all markdown in a folder) AND they name or imply a specific directory → find_files with that path and a glob_pattern
 - If the user wants to search inside files for text or code (grep-style: find a function name, TODO, string) AND they name or imply a specific directory → search_files with that path and a regex pattern
@@ -237,7 +238,7 @@ async def run_tool_loop(
                 "Tool: %s  Thinking: %r  Args: %s",
                 tool_name, thinking, json.dumps(arguments, ensure_ascii=False)[:200],
             )
-            if thinking and speak_thinking:
+            if thinking and speak_thinking and tool_name != "save_memory":
                 await speak_thinking(thinking)
 
             if tool_name == "take_screenshot" and capture_screenshot is not None:
